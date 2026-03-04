@@ -6,7 +6,13 @@
 @Contact      : sebin.oh@berkeley.edu
 @Description  : 
 
+Generate baseline lognormal fragility parameters from IDA capacities,
+then create sigma-perturbed variants by multiplying the (scale) parameter
+by a lognormal noise factor.
+
 """
+
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -15,60 +21,110 @@ import numpy as np
 import pandas as pd
 from scipy.stats import lognorm
 
+
+# =============================================================================
+# Settings
+# =============================================================================
 TARGET_REGION = "Milpitas"
+
 IDA_CSV = Path(f"../data/IDA_results/{TARGET_REGION}/IDA_results_sigma000.csv")
+OUT_DIR = Path(f"../data/fragility_params/{TARGET_REGION}")
 
 DTYPE_NP = np.float64
+SEED = 42
 
-bldg_capa = pd.read_csv(IDA_CSV)
-bldg_capa = bldg_capa.to_numpy()[:, 1:].astype(DTYPE_NP, copy=False).T
-
-
-num_bldgs = bldg_capa.shape[0]
-frag_params = np.empty((num_bldgs, 3), dtype=DTYPE_NP)
-
-for i in range(num_bldgs):
-    temp = bldg_capa[i]
-    temp = temp[np.isfinite(temp) & (temp > 0)]
-
-    # Robust fallback if too few samples
-    if temp.size < 2:
-        temp = np.array([1e-6, 2e-6], dtype=DTYPE_NP)
-
-    shape, loc, scale = lognorm.fit(temp, floc=0)
-    frag_params[i] = (shape, loc, scale)
+SIGMAS = np.round(np.arange(0.0, 1.001, 0.01), 3)  # lognormal sigma values
+SIGMA_LABEL_SCALE = 100  # sigma=0.25 -> "025"
 
 
-## Prepare the frag_params for different c.o.v values
-bldg_info  = pd.read_csv(f"../data/IDA_results/IDA_results_sigma000.csv")
-bldg_capa  = bldg_info.to_numpy()[:, 1:].astype(DTYPE_NP, copy=False).T  # (num_bldgs, num_gms)
+# =============================================================================
+# Helpers
+# =============================================================================
+def sigma_label(sigma: float) -> str:
+    return f"{int(round(float(sigma) * SIGMA_LABEL_SCALE)):03d}"
 
-# drop rows with any NaN (track dropped indices for later alignment)
-idx_nan = np.where(np.any(np.isnan(bldg_capa), axis=1))[0]
-if idx_nan.size > 0:
-    keep = np.ones(bldg_capa.shape[0], dtype=bool); keep[idx_nan] = False
-    bldg_capa = bldg_capa[keep]
 
-num_bldgs = len(bldg_capa)
+def load_capacities(csv_path: Path, dtype: np.dtype) -> np.ndarray:
+    """
+    Load IDA results CSV and return capacities as (n_bldgs, n_gms).
+    Assumes first column is GM_ID (or similar) and remaining are capacities.
+    """
+    if not csv_path.exists():
+        raise FileNotFoundError(f"IDA CSV not found: {csv_path}")
 
-frag_params = np.zeros((num_bldgs, 3), dtype=DTYPE_NP)
-for i in range(num_bldgs):
-    temp = bldg_capa[i]
-    temp = temp[(~np.isnan(temp)) & (temp != 0)]
-    if temp.size < 2:
-        temp = np.array([1e-6, 2e-6], dtype=DTYPE_NP)
-    shape, loc, scale = lognorm.fit(temp, floc=0)
-    frag_params[i, :] = [DTYPE_NP(shape), DTYPE_NP(loc), DTYPE_NP(scale)]
+    df = pd.read_csv(csv_path)
+    capa = df.to_numpy()[:, 1:].astype(dtype, copy=False).T
+    return capa
 
-sigmas = np.round(np.arange(0.0, 1.001, 0.01), 3)
 
-for sigma_idx, sigma in enumerate(sigmas):
-    print(f"{sigma_idx}/{len(sigmas)}")
+def drop_nan_buildings(capa: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Drop buildings (rows) with any NaN and return:
+      - filtered capacities
+      - keep mask (True for retained buildings)
+    """
+    has_nan = np.any(~np.isfinite(capa), axis=1)
+    keep = ~has_nan
+    return capa[keep, :], keep
 
-    sigma_lab = f"{int(round(sigma*100)):03d}"    
-    frag_params_temp = frag_params.copy()
 
-    noise = np.random.lognormal(mean=0.0, sigma=float(sigma), size=frag_params_temp.shape[0])
-    frag_params_temp[:, 2] *= noise
+def fit_lognormal_params(capa: np.ndarray, dtype: np.dtype) -> np.ndarray:
+    """
+    Fit lognormal(shape, loc, scale) per building from capacity samples.
 
-    np.save(f"../data/fragility_params/{TARGET_REGION}/frag_params_sigma{sigma_lab}.npy", frag_params_temp)
+    Returns array of shape (n_bldgs, 3) = [shape, loc, scale].
+    """
+    n_bldgs = capa.shape[0]
+    out = np.empty((n_bldgs, 3), dtype=dtype)
+
+    for i in range(n_bldgs):
+        x = capa[i]
+        x = x[np.isfinite(x) & (x > 0)]
+
+        # Robust fallback if too few samples
+        if x.size < 2:
+            x = np.array([1e-6, 2e-6], dtype=dtype)
+
+        shape, loc, scale = lognorm.fit(x, floc=0)
+        out[i] = (dtype(shape), dtype(loc), dtype(scale))
+
+    return out
+
+
+# =============================================================================
+# Main
+# =============================================================================
+def main() -> None:
+    rng = np.random.default_rng(SEED)
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    # 1) Load capacities and drop NaN buildings
+    capa = load_capacities(IDA_CSV, DTYPE_NP)
+    capa, keep_mask = drop_nan_buildings(capa)
+
+    print(f"Loaded capacities: {capa.shape[0]:,} buildings x {capa.shape[1]:,} GMs")
+    if not np.all(keep_mask):
+        print(f"Dropped {np.sum(~keep_mask):,} buildings due to NaNs")
+
+    # 2) Fit baseline fragility params (sigma000)
+    frag0 = fit_lognormal_params(capa, DTYPE_NP)
+
+    # Optionally save baseline too (useful for consistency)
+    np.save(OUT_DIR / "frag_params_sigma000.npy", frag0)
+
+    # 3) Generate sigma-perturbed variants by scaling the lognormal scale parameter
+    for k, sigma in enumerate(SIGMAS, start=1):
+        lab = sigma_label(sigma)
+        print(f"{k}/{len(SIGMAS)}  sigma={sigma:.3f} -> {lab}")
+
+        frag = frag0.copy()
+
+        if sigma > 0:
+            noise = rng.lognormal(mean=0.0, sigma=float(sigma), size=frag.shape[0])
+            frag[:, 2] *= noise  # perturb scale only
+
+        np.save(OUT_DIR / f"frag_params_sigma{lab}.npy", frag)
+
+
+if __name__ == "__main__":
+    main()
