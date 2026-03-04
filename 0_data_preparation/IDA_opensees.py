@@ -36,7 +36,7 @@ REGION = "Milpitas"
 DAMAGE_STATE = "DS1"  # "DS1", "DS2", "DS3", "DS4"
 
 NUM_GMS = 100
-CVS = np.array([0.0], dtype=float)  # e.g., np.round(np.arange(0.0, 0.051, 0.01), 2)
+SIGMAS = np.array([0.0], dtype=float)  # e.g., np.round(np.arange(0.0, 0.051, 0.01), 2)
 
 SCALES = np.arange(0.1, 20.0, 0.1)  # scale factors for binary search
 G_TO_MPS2 = 9.811
@@ -324,9 +324,9 @@ def main() -> None:
 
     total_start = time.time()
 
-    for cv in np.asarray(CVS, dtype=float):
-        cv_label = f"{int(round(cv * 100)):03d}"
-        bim_csv = (BIM_DIR / f"BIM_cv{cv_label}.csv").resolve()
+    for sigma in np.asarray(SIGMAS, dtype=float):
+        sigma_label = f"{int(round(sigma * 100)):03d}"
+        bim_csv = (BIM_DIR / f"BIM_sigma{sigma_label}.csv").resolve()
 
         if not bim_csv.exists():
             raise FileNotFoundError(f"BIM CSV not found: {bim_csv}")
@@ -343,7 +343,7 @@ def main() -> None:
             if not dt_file.exists():
                 raise FileNotFoundError(f"dt file not found: {dt_file}")
 
-            print(f"[cv={cv:.2f}] Processing GM {gm_id} ({gm_id + 1}/{NUM_GMS})")
+            print(f"[sigma={sigma:.2f}] Processing GM {gm_id} ({gm_id + 1}/{NUM_GMS})")
 
             # Load GM once here just to compute its PGA (in g) and length for n_steps
             gm_arr = np.loadtxt(gm_file, dtype=float)
@@ -376,7 +376,7 @@ def main() -> None:
             index=pd.Index(range(NUM_GMS), name="GM_ID"),
         )
 
-        out_path = OUT_DIR / f"IDA_results_cv{cv_label}.csv"
+        out_path = OUT_DIR / f"IDA_results_sigma{sigma_label}.csv"
         df_out.to_csv(out_path, float_format="%.4f")
         print(f"Wrote: {out_path}")
 

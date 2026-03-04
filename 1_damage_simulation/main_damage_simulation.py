@@ -8,13 +8,13 @@
 
 Regional damage-volume simulation on GPU.
 
-Workflow (per Mw, per CV):
+Workflow (per Mw, per SIGMA):
   1) Compute GMPE ln(demand) mean/std and spatial correlation of intra-residuals.
-  2) Use capacity correlation from IDA results (cov000) to build ln(capacity) covariance.
+  2) Use capacity correlation from IDA results to build ln(capacity) covariance.
   3) Sample X = ln(C) - ln(D) ~ MVN(X_mean, X_cov) on GPU.
   4) Damage indicator: X < 0. Save:
-       - dv      = fraction damaged
-       - dv_cost = sum(repair_cost of damaged buildings)
+       - damage_fraction    = # damaged buildings / # total buildings
+       - repair_cost        = sum(repair_cost of damaged buildings)
 
 """
 
@@ -30,6 +30,7 @@ import numpy as np
 import pandas as pd
 import cupy as cp
 import utm
+from scipy.stats import lognorm
 
 warnings.simplefilter(action="ignore", category=FutureWarning)
 
@@ -48,7 +49,7 @@ from fn_GMPE_parallel_gpu_vec import (
 TARGET_REGION = "Milpitas"
 TARGET_STRUCTURE = "MultiStory"  # "SingleStory", "TwoStory", "MultiStory", or "All"
 
-CVS = np.round(np.arange(0.0, 1.001, 0.01), 3)
+SIGMAS = np.round(np.arange(0.0, 1.001, 0.01), 3)
 MWS = np.round(np.arange(6.25, 8.51, 0.05), 2)
 
 GMM_NAME = "CY14"  # "CY14", "ASK14", "BSSA14", "CB14"
@@ -67,19 +68,18 @@ DEPTH_TO_TOP = DTYPE_NP(3.0)
 STRIKE, RAKE, DIP = 325, 180, 90
 
 # Paths
-IDA_CSV = Path(f"../data/IDA_results/{TARGET_REGION}/IDA_results_cv000.csv")
+IDA_CSV = Path(f"../data/IDA_results/{TARGET_REGION}/IDA_results_sigma000.csv")
 REGION_CSV = Path(f"../data/building_inventories/RegionalInventory_{TARGET_REGION}.csv")
 FRAG_DIR = Path(f"../data/fragility_params/{TARGET_REGION}")
 OUT_DIR = Path(f"../data/damage_simulation_results/{TARGET_REGION}")
 
-# If True, capacity covariance is fixed from cov000 (matches your current script behavior).
-# If False, capacity covariance is rebuilt per-CV using that CV’s sigma (slower).
-FIX_CAPACITY_COV_FROM_CV000 = True
+# If True, capacity covariance is fixed from sigma000.
+# If False, capacity covariance is rebuilt per-SIGMA using that SIGMA’s sigma (slower).
+FIX_CAPACITY_COV_FROM_SIGMA000 = True
 
-# Cholesky stability (only used if FIX_CAPACITY_COV_FROM_CV000=True)
+# Cholesky stability (only used if FIX_CAPACITY_COV_FROM_SIGMA000=True)
 CHOLESKY_JITTER0 = DTYPE_CP(1e-10)
 CHOLESKY_MAX_TRIES = 6
-
 
 # =============================================================================
 # GPU utilities
@@ -117,9 +117,8 @@ def gmm_dispatch(name: str) -> Callable:
     raise ValueError(f"Invalid GMM_NAME: {name!r}")
 
 
-def cv_label(cv: float) -> str:
-    # keeps your original 4-digit, 3-decimal labeling (cv=0.01 -> 0010)
-    return f"{int(round(cv * 1000)):04d}"
+def sigma_label(sigma: float) -> str:
+    return f"{int(round(sigma * 100)):03d}"
 
 
 def mw_label(mw: float) -> str:
@@ -143,9 +142,8 @@ def robust_cholesky(A: cp.ndarray, jitter0: float = CHOLESKY_JITTER0, max_tries:
 # Load data
 # =============================================================================
 # IDA capacities: (num_gms, num_bldgs+1 columns) -> keep numeric capacities and transpose to (num_bldgs, num_gms)
-bldg_info = pd.read_csv(IDA_CSV)
-bldg_capa = bldg_info.to_numpy()[:, 1:].astype(DTYPE_NP, copy=False).T
-del bldg_info
+bldg_capa = pd.read_csv(IDA_CSV)
+bldg_capa = bldg_capa.to_numpy()[:, 1:].astype(DTYPE_NP, copy=False).T
 
 # Drop buildings with any NaN capacity
 keep_nonan = ~np.any(np.isnan(bldg_capa), axis=1)
@@ -173,17 +171,62 @@ print(f"Buildings kept: {num_bldgs:,} | GMs: {num_gms:,}")
 ln_capa = np.log(np.clip(bldg_capa, 1e-12, None)).astype(DTYPE_NP, copy=False)
 ln_capa_corr_np = np.corrcoef(ln_capa, rowvar=True).astype(DTYPE_NP, copy=False)
 
-# Baseline capacity sigma/mean from cov000 frag-params (to match your current approach)
-frag0 = np.load(FRAG_DIR / f"bldg_frag_params_cov{cv_label(0.0)}.npy").astype(DTYPE_NP, copy=False)
-frag0 = frag0[keep, :]  # align
+# Baseline capacity mean/std (sigma000). Prefer loading a precomputed file;
+# otherwise fit lognormal params from IDA capacities.
+frag_path = FRAG_DIR / f"frag0_sigma{sigma_label(0.0)}.npy"
+
+frag0 = None
+
+if frag_path.exists():
+    try:
+        frag0_loaded = np.load(frag_path).astype(DTYPE_NP, copy=False)
+
+        # Align if the file contains the full inventory and you have a keep-mask
+        # (safe no-op if already aligned)
+        if "keep" in globals():
+            keep_mask = np.asarray(keep, dtype=bool)
+            if frag0_loaded.shape[0] == keep_mask.size:
+                frag0_loaded = frag0_loaded[keep_mask, :]
+
+        frag0 = frag0_loaded
+
+    except Exception as e:
+        warnings.warn(
+            f"Failed to load baseline frag file {frag_path} ({type(e).__name__}: {e}). "
+            "Falling back to fitting from IDA capacities.",
+            RuntimeWarning,
+        )
+
+if frag0 is None:
+    # Fit from IDA capacities (assumes bldg_capa is already aligned to your current building set)
+    num_bldgs = bldg_capa.shape[0]
+    frag0 = np.empty((num_bldgs, 3), dtype=DTYPE_NP)
+
+    for i in range(num_bldgs):
+        temp = bldg_capa[i]
+        temp = temp[np.isfinite(temp) & (temp > 0)]
+
+        # Robust fallback if too few samples
+        if temp.size < 2:
+            temp = np.array([1e-6, 2e-6], dtype=DTYPE_NP)
+
+        shape, loc, scale = lognorm.fit(temp, floc=0)
+        frag0[i] = (shape, loc, scale)
+
+    warnings.warn(
+        f"{frag_path.name} not found (or could not be loaded).\n"
+        "Using lognormal fits from IDA capacities for baseline capacity mean/std. ",
+        RuntimeWarning,
+    )
+
 ln_capa_mean0_np = np.log(frag0[:, 2]).astype(DTYPE_NP, copy=False)  # mu = log(scale)
-ln_capa_std0_np = frag0[:, 0].astype(DTYPE_NP, copy=False)          # sigma (shape)
+ln_capa_std0_np  = frag0[:, 0].astype(DTYPE_NP, copy=False)          # sigma (shape)
 del frag0
 
 # Move constant capacity correlation to GPU
 ln_capa_corr_cp = cp.asarray(ln_capa_corr_np, dtype=DTYPE_CP)
 
-# Capacity covariance used when FIX_CAPACITY_COV_FROM_CV000=True
+# Capacity covariance used when FIX_CAPACITY_COV_FROM_SIGMA000=True
 ln_capa_std0_cp = cp.asarray(ln_capa_std0_np, dtype=DTYPE_CP)
 ln_capa_cov0_cp = cp.outer(ln_capa_std0_cp, ln_capa_std0_cp) * ln_capa_corr_cp
 
@@ -201,7 +244,7 @@ vs30 = np.maximum(vs30, VS30_MIN)
 
 assets = pd.DataFrame({"x": easting, "y": northing, "Vs30": vs30})
 
-repair_cost_cp = cp.asarray(region_info["RepairCost"].to_numpy(dtype=DTYPE_NP, copy=False), dtype=DTYPE_CP)
+bldg_repair_cost_cp = cp.asarray(region_info["RepairCost"].to_numpy(dtype=DTYPE_NP, copy=False), dtype=DTYPE_CP)
 
 # =============================================================================
 # Hazard info (epicenter UTM)
@@ -221,8 +264,8 @@ ln_dmnd_corr_cp = intra_residuals_corr_fn_cupy(
 # =============================================================================
 # Output dirs
 # =============================================================================
-(out_dv := OUT_DIR / "dv").mkdir(parents=True, exist_ok=True)
-(out_dv_cost := OUT_DIR / "dv_cost").mkdir(parents=True, exist_ok=True)
+(out_damage_fraction := OUT_DIR / "damage_fraction").mkdir(parents=True, exist_ok=True)
+(out_repair_cost := OUT_DIR / "repair_cost").mkdir(parents=True, exist_ok=True)
 
 # =============================================================================
 # Main loop
@@ -256,8 +299,8 @@ for mw in MWS:
     # Demand covariance for this Mw
     ln_dmnd_cov_cp = cp.outer(ln_dmnd_std_cp, ln_dmnd_std_cp) * ln_dmnd_corr_cp
 
-    # If we keep capacity covariance fixed, X_cov is fixed across CVs -> precompute Cholesky once.
-    if FIX_CAPACITY_COV_FROM_CV000:
+    # If we keep capacity covariance fixed, X_cov is fixed across SIGMAS -> precompute Cholesky once.
+    if FIX_CAPACITY_COV_FROM_SIGMA000:
         X_cov_cp = ln_dmnd_cov_cp + ln_capa_cov0_cp
         L_cp = robust_cholesky(X_cov_cp)
         LT_cp = L_cp.T
@@ -265,31 +308,31 @@ for mw in MWS:
         L_cp = None
         LT_cp = None
 
-    dv_cp = cp.empty((NUM_SIM,), dtype=DTYPE_CP)
-    dv_cost_cp = cp.empty((NUM_SIM,), dtype=DTYPE_CP)
+    damage_fraction_cp = cp.empty((NUM_SIM,), dtype=DTYPE_CP)
+    repair_cost_cp = cp.empty((NUM_SIM,), dtype=DTYPE_CP)
 
-    for k, cv in enumerate(CVS):
-        t0_cv = time.time()
-        cv_lab = cv_label(float(cv))
+    for k, sigma in enumerate(SIGMAS):
+        t0_sigma = time.time()
+        sigma_lab = sigma_label(float(sigma))
         mw_lab = mw_label(float(mw))
 
-        frag = np.load(FRAG_DIR / f"bldg_frag_params_cov{cv_lab}.npy").astype(DTYPE_NP, copy=False)
+        frag = np.load(FRAG_DIR / f"frag0_sigma{sigma_lab}.npy").astype(DTYPE_NP, copy=False)
         frag = frag[keep, :]
 
         ln_capa_mean_cp = cp.asarray(np.log(frag[:, 2]), dtype=DTYPE_CP)
 
-        # X_mean changes with CV
+        # X_mean changes with SIGMA
         X_mean_cp = ln_capa_mean_cp - ln_dmnd_mean_cp
 
-        # Optionally rebuild capacity covariance per CV (slower)
-        if not FIX_CAPACITY_COV_FROM_CV000:
+        # Optionally rebuild capacity covariance per SIGMA (slower)
+        if not FIX_CAPACITY_COV_FROM_SIGMA000:
             ln_capa_std_cp = cp.asarray(frag[:, 0], dtype=DTYPE_CP)
             ln_capa_cov_cp = cp.outer(ln_capa_std_cp, ln_capa_std_cp) * ln_capa_corr_cp
             X_cov_cp = ln_dmnd_cov_cp + ln_capa_cov_cp
             L_cp = robust_cholesky(X_cov_cp)
             LT_cp = L_cp.T
 
-        # --- Sample in batches, compute dv and dv_cost on GPU ---
+        # --- Sample in batches, compute damage_fraction and repair_cost on GPU ---
         invalid_total = 0
 
         for s0 in range(0, NUM_SIM, BATCH_SIZE):
@@ -307,8 +350,8 @@ for mw in MWS:
             # avoid divide-by-zero if a row is entirely invalid
             valid_cnt = cp.maximum(valid_cnt, 1)
 
-            dv_cp[s0 : s0 + bs] = damaged_cnt / valid_cnt
-            dv_cost_cp[s0 : s0 + bs] = (repair_cost_cp[None, :] * damaged).sum(axis=1)
+            damage_fraction_cp[s0 : s0 + bs] = damaged_cnt / valid_cnt
+            repair_cost_cp[s0 : s0 + bs] = (bldg_repair_cost_cp[None, :] * damaged).sum(axis=1)
 
             invalid_total += int((~valid).sum().get())
 
@@ -317,19 +360,19 @@ for mw in MWS:
             free_gpu()
 
         if invalid_total > 0.01 * (NUM_SIM * num_bldgs):
-            print(f"Warning: many invalid samples ({invalid_total:,}) for Mw={mw:.2f}, cv={cv:.3f}")
+            print(f"Warning: many invalid samples ({invalid_total:,}) for Mw={mw:.2f}, sigma={sigma:.3f}")
 
         # Save
-        dv_np = cp.asnumpy(dv_cp)
-        dv_cost_np = cp.asnumpy(dv_cost_cp)
+        damage_fraction_np = cp.asnumpy(damage_fraction_cp)
+        repair_cost_np = cp.asnumpy(repair_cost_cp)
 
-        np.save(out_dv / f"{TARGET_STRUCTURE}_dv_Mw{mw_lab}_cov{cv_lab}_{TARGET_REGION}_{GMM_NAME}.npy", dv_np)
-        np.save(out_dv_cost / f"{TARGET_STRUCTURE}_dv_cost_Mw{mw_lab}_cov{cv_lab}_{TARGET_REGION}_{GMM_NAME}.npy", dv_cost_np)
+        np.save(out_damage_fraction / f"{TARGET_STRUCTURE}_damage_fraction_Mw{mw_lab}_sigma{sigma_lab}_{TARGET_REGION}_{GMM_NAME}.npy", damage_fraction_np)
+        np.save(out_repair_cost / f"{TARGET_STRUCTURE}_repair_cost_Mw{mw_lab}_sigma{sigma_lab}_{TARGET_REGION}_{GMM_NAME}.npy", repair_cost_np)
 
         if k % 25 == 0:
-            print(f"  cv={cv:.3f} done in {time.time() - t0_cv:.2f}s")
+            print(f"  sigma={sigma:.3f} done in {time.time() - t0_sigma:.2f}s")
 
-        del frag, ln_capa_mean_cp, X_mean_cp, dv_np, dv_cost_np
+        del frag, ln_capa_mean_cp, X_mean_cp, damage_fraction_np, repair_cost_np
         free_gpu()
 
     # cleanup per Mw
