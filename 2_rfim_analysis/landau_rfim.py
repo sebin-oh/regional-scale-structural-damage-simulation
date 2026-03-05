@@ -33,8 +33,8 @@ RESOLUTION = 100  # Grid resolution for plots
 Mws = np.round(np.arange(3.5, 8.51, 0.05), 2)
 covs = np.round(np.arange(0.0, 1.001, 0.01), 3)
 
-coeffs_a1 = np.load("coeffs_a1.npy").astype(np.float64)
-coeffs_a2 = np.load("coeffs_a2.npy").astype(np.float64)
+coeffs_a1 = np.load("../data/rfim_params_est/coeffs_a1.npy").astype(np.float64)
+coeffs_a2 = np.load("../data/rfim_params_est/coeffs_a2.npy").astype(np.float64)
 
 def Mw_to_a1(Mw):
     return np.polyval(coeffs_a1, Mw)

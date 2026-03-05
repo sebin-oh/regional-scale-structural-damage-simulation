@@ -126,7 +126,7 @@ def eng_dv_path(
     """
     Engineering-practice DV file path helper.
     """
-    kind = "dv_cost" if cost else "dv"
+    kind = "repair_cost" if cost else "damage_fraction"
     subdir = Path("eng")
 
     mw_lab = mw_label(mw)
@@ -141,7 +141,7 @@ def eng_dv_path(
         tag = "Dpdn" if variant == "base" else str(corr_eng)
         suffix = f"_corr{tag}"
 
-    fname = f"{target_structure}_{kind}_Mw{mw_lab}_sigma{sig_lab}_{target_region}{suffix}.npy"
+    fname = f"{target_region}_{target_structure}_{kind}_Mw{mw_lab}_sigma{sig_lab}{suffix}.npy"
     return DATA_DIR / "damage_simulation_results" / target_region / kind / fname
 
 
@@ -762,6 +762,7 @@ def main_eng(
             verts = pc.get_paths()[0].vertices
             m = np.mean(verts[:, 0])
             verts[:, 0] = np.minimum(verts[:, 0], m)
+            pc.set_alpha(None)
             pc.set_facecolor(mcolors.to_rgba(cL, alpha))
             pc.set_edgecolor((0, 0, 0, 1))
             pc.set_linewidth(1.0)
@@ -773,6 +774,7 @@ def main_eng(
             verts = pc.get_paths()[0].vertices
             m = np.mean(verts[:, 0])
             verts[:, 0] = np.maximum(verts[:, 0], m)
+            pc.set_alpha(None)
             pc.set_facecolor(mcolors.to_rgba(cR, alpha))
             pc.set_edgecolor((0, 0, 0, 1))
             pc.set_linewidth(1.0)
@@ -812,7 +814,7 @@ def main_eng(
             mpatches.Patch(facecolor=mcolors.to_rgba(cL, 0.5), edgecolor="black", linewidth=1.0, label=lab_left),
             mpatches.Patch(facecolor=mcolors.to_rgba(cR, 0.5), edgecolor="black", linewidth=1.0, label=lab_right),
         ]
-        ax.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.5, 1.02),
+        ax.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.5, 1.1),
                   ncol=2, frameon=False, fontsize=16, columnspacing=0.8, handlelength=1.2)
 
         plt.subplots_adjust(top=0.88)
@@ -958,6 +960,22 @@ if __name__ == "__main__":
             target_structure="All",
             sigma=0.1,
             category=None,  # e.g., "StructureType"
+            savefig=SAVE_FIG,
+        )
+
+    elif FIGURE_TYPE == "eng":
+        main_eng(
+            target_region="Milpitas",
+            target_structure="MultiStory",
+            category=None,
+
+            # target_region="SanFrancisco_NE",
+            # target_structure="All",
+            # category="StructureType",
+
+            corr="Indp",
+            cost=True,
+            legend=True,
             savefig=SAVE_FIG,
         )
 

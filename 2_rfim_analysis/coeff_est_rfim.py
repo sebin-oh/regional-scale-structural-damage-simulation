@@ -6,208 +6,207 @@
 @Contact      : sebin.oh@berkeley.edu
 @Description  : 
 
-This script estimates the relationship between Mw-H and COV-\Delta
-using the zero-temperature mean-field solution for the RFIM.
-The H and \Delta are represented by a1 and a2 in the self-consistent equation:
-    m = erf((m + a1) / (sqrt(2) * a2)),
-where a1 = H/J and a2 = \Delta/J.
-
-The estimation is done in two steps:
-1) For each (Mw, COV) pair, estimate (a1_hat, a2_hat) from the simulated damage data
-   using nonlinear least squares.
-2) Fit a1_hat(Mw) and a2_hat(COV) using quadratic polynomials, with the constraint
-    that the linear coefficient of a2_hat(COV) is nonnegative (to ensure a2 grows
-    with COV).
-
-A fine tuning is further conducted using the estimates from step 2 as initial guesses:
-    a) Fix a2(COV) and estimate a1(Mw)
-    b) Fix a1(Mw) and estimate a2(COV)
-    c) Repeat a) and b) until convergence.
-
-While optimizing a2(COV), a penalty is added to discourage very steep transitions
-to make the estimates more realistic. The penalty is based on the susceptibility χ.
-
-The final outputs are the fitted coefficients for a1(Mw) and a2(COV),
-along with the reproduced phase diagram.
-
-### NOTE ###
-Only 
-
+- Estimate mean-field RFIM parameters (a1(Mw), a2(sigma)) from regional DV simulations,
+- Plot the implied phase diagram with a bistable regime overlay.
 """
-# %%
+
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Literal, Optional, Tuple
+
 import numpy as np
-from math import erf, sqrt, isfinite, copysign
-from scipy.optimize import newton, root_scalar
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
-
-plt.rcParams.update({
-    "font.family": "sans-serif",
-    "font.sans-serif": ["Helvetica"],
-    "mathtext.fontset": "cm",
-})
-
-SaveFig = False  # set to True to save figures
-RESOLUTION = 501  # grid resolution for plots
-
-
-# %%
-from pathlib import Path
-from typing import Tuple, Optional, Literal
-
-StructureType = Literal["SingleStory", "TwoStory", "MultiStory"]
-ModeType = Literal["1st", "2nd"]
-
-def _dv_filename(
-    target_structure: StructureType,
-    target_region: str,
-    mode: ModeType,
-    cost: bool,
-    Mw: Optional[float],
-    cov: Optional[float],
-    corr: Optional[float],
-    category: Optional[str],
-) -> Tuple[Path, str]:
-    """Build DV filename and a short English title."""
-    base = f"C:/Users/ohsb1/Desktop/Savio/{target_region}/{target_structure}_dv"
-    if cost:
-        base += "_cost"
-
-    Mw_label = f"{int(round(Mw*100)):03d}"
-    cov_label = f"{int(round(cov*1000)):04d}"
-
-    suffix = f"_Mw{Mw_label}_cov{cov_label}_{target_region}"
-
-    fname = f"{base}{suffix}.npy"
-    title = None
-
-    return Path(fname), title
-
-Mws = np.round(np.arange(3.5, 8.51, 0.05), 2)
-covs = np.round(np.arange(0.0, 1.001, 0.01), 3)
-
-num_sim = 10_000
-
-top_values_mean = []
-for cov_idx, cov_val in enumerate(covs):
-    print(cov_idx)
-
-    means_per_Mw = []
-    for Mw_idx, Mw_val in enumerate(Mws):
-        dv_path, _ = _dv_filename("MultiStory", "Milpitas_all", "1st", None, Mw_val, cov_val, None, None)
-        if not dv_path.exists():
-            raise FileNotFoundError(f"Missing DV file: {dv_path}")
-        dv_temp = np.load(dv_path)
-
-        counts, bin_edges = np.histogram(dv_temp, bins=100)
-
-        sorted_bins = np.argsort(counts)[::-1]
-
-        count = 0
-        selected_bin_indices = []
-        for bin_idx in sorted_bins:
-            if count > 0.01 * num_sim:
-                break
-            selected_bin_indices.append(bin_idx)
-            count += counts[bin_idx]
-
-        selected_bin_indices = np.array(selected_bin_indices)
-        bin_mins = bin_edges[selected_bin_indices]
-        bin_maxs = bin_edges[selected_bin_indices + 1]
-
-        mask = np.zeros_like(dv_temp, dtype=bool)
-        for bmin, bmax in zip(bin_mins, bin_maxs):
-            mask |= (dv_temp >= bmin) & (dv_temp < bmax)
-
-        dv_temp_selected = dv_temp[mask]
-        means_per_Mw.append(np.mean(dv_temp_selected))
-
-    top_values_mean.append(means_per_Mw)
-
-top_values_mean = np.array(top_values_mean)
-
-# %%
-top_values_mean_orig = top_values_mean.copy()
-Mws_orig = Mws.copy()
-covs_orig = covs.copy()
-
-top_values_mean = top_values_mean_orig[60:,:]
-Mws = Mws_orig.copy()
-covs = covs_orig[60:]
-
-# %%
 from scipy.optimize import least_squares
 from scipy.special import erf, erfinv
 
-def mf_self_consistent_eq(m, a1, a2):
-    """Mean-field prediction of magnetization m from parameters a1, a2."""
-    return erf((m + a1) / (np.sqrt(2.0) * a2))
 
-def mf_self_consistent_eq_res(m, a1, a2):
-    """Residuals for mean-field self-consistent equation."""
-    return m - mf_self_consistent_eq(m, a1, a2)
+# =============================================================================
+# User settings
+# =============================================================================
+SaveFig = False
+RESOLUTION = 501
+
+TARGET_REGION = "Milpitas"
+TARGET_STRUCTURE: Literal["SingleStory", "TwoStory", "MultiStory"] = "MultiStory"
+
+DATA_DIR = Path("../data/damage_simulation_results")
+FIG_DIR = Path("../results")
+
+MWS = np.round(np.arange(3.5, 8.51, 0.05), 2)
+SIGMAS = np.round(np.arange(0.0, 1.001, 0.01), 3)
+
+NUM_SIM = 10_000
+HIST_BINS = 100
+TOP_MASS_FRAC = 0.01  # use bins that collectively contain top 1% of samples
+SIGMA_FIT_START_IDX = 60  # match your previous: fit only on sigmas[60:]
+
+# Fitting knobs
+RIDGE = 1e-4
+MAX_ITERS = 1000
+TOL = 1e-8
+ETA = 1.0  # damping in alternating updates (1.0 = no damping)
+
+# Width penalty for a2 fitting (encourages wider transitions)
+LAM_WIDTH = 1e-2
+M_BAND = 0.6
+A2_FLOOR = 0.0
+ENFORCE_MONOTONE_A2 = True
+
+
+# =============================================================================
+# File/path helpers
+# =============================================================================
+def mw_label(mw: float) -> str:
+    return f"{int(round(float(mw) * 100)):03d}"
+
+
+def sigma_label(sigma: float) -> str:
+    return f"{int(round(float(sigma) * 100)):03d}"
+
+
+def dv_file(
+    *,
+    region: str,
+    structure: str,
+    mw: float,
+    sigma: float,
+    cost: bool = False,
+) -> Path:
+    kind = "repair_cost" if cost else "damage_fraction"
+    fname = f"{region}_{structure}_{kind}_Mw{mw_label(mw)}_sigma{sigma_label(sigma)}.npy"
+    return DATA_DIR / region / kind / fname
+
+
+# =============================================================================
+# DV -> top-bin mean
+# =============================================================================
+def top_mass_bin_mean(x: np.ndarray, *, bins: int, top_mass_frac: float, num_sim: int) -> float:
+    """
+    Take histogram bins in decreasing count order until cumulative count exceeds
+    (top_mass_frac * num_sim), then return the mean of samples falling in those bins.
+    """
+    x = np.asarray(x, float)
+    x = x[np.isfinite(x)]
+    if x.size == 0:
+        return np.nan
+
+    counts, edges = np.histogram(x, bins=bins)
+    order = np.argsort(counts)[::-1]
+
+    needed = top_mass_frac * num_sim
+    cum = 0
+    selected_bins = []
+    for b in order:
+        if cum > needed:
+            break
+        selected_bins.append(b)
+        cum += counts[b]
+
+    selected_bins = np.asarray(selected_bins, dtype=int)
+    bmin = edges[selected_bins]
+    bmax = edges[selected_bins + 1]
+
+    mask = np.zeros_like(x, dtype=bool)
+    for lo, hi in zip(bmin, bmax):
+        mask |= (x >= lo) & (x < hi)
+
+    if not np.any(mask):
+        return float(np.mean(x))
+
+    return float(np.mean(x[mask]))
+
+
+def load_top_values_mean(
+    *,
+    region: str,
+    structure: str,
+    mws: np.ndarray,
+    sigmas: np.ndarray,
+    bins: int,
+    top_mass_frac: float,
+    num_sim: int,
+) -> np.ndarray:
+    """
+    Return top_values_mean[sigma_idx, mw_idx] in [0,1].
+    """
+    out = np.empty((sigmas.size, mws.size), dtype=float)
+
+    for si, s in enumerate(sigmas):
+        print(f"sigma row {si+1}/{sigmas.size}")
+        for mi, mw in enumerate(mws):
+            p = dv_file(region=region, structure=structure, mw=float(mw), sigma=float(s), cost=False)
+            if not p.exists():
+                raise FileNotFoundError(f"Missing DV file: {p}")
+            dv = np.load(p)
+            out[si, mi] = top_mass_bin_mean(dv, bins=bins, top_mass_frac=top_mass_frac, num_sim=num_sim)
+
+    return out
+
+
+# =============================================================================
+# Mean-field fitting utilities
+# =============================================================================
+def _clip_m(M: np.ndarray, mask: np.ndarray, eps: float = 1e-6) -> np.ndarray:
+    M2 = M.copy()
+    M2[mask] = np.clip(M2[mask], -1 + eps, 1 - eps)
+    return M2
+
 
 def fit_grid_a1_a2(
-    M, mask=None, a1_init=None, a2_init=None,
-    sign_targets=None,           # optional array of shape (C,) with entries -1 or +1
-    ridge=0.0,                   # small L2 on alpha and b2 (log a2)
-    sign_rule="mean",            # "mean" or "median" to infer signs from each column of M
-    verbose=True
-    ):
+    M: np.ndarray,
+    *,
+    mask: Optional[np.ndarray] = None,
+    a1_init: Optional[np.ndarray] = None,
+    a2_init: Optional[np.ndarray] = None,
+    sign_targets: Optional[np.ndarray] = None,
+    ridge: float = 0.0,
+    sign_rule: Literal["mean", "median"] = "mean",
+    verbose: bool = True,
+) -> Tuple[np.ndarray, np.ndarray, object]:
     """
-    Estimate column-wise a1[j] and row-wise a2[i]>0 from:
-        M[i,j] ≈ erf( (M[i,j] + a1[j]) / (sqrt(2) * a2[i]) )
+    Estimate column-wise a1[j] and row-wise a2[i] > 0 from:
+        M[i,j] ≈ erf((M[i,j] + a1[j]) / (sqrt(2) * a2[i]))
 
-    with the constraint that a1[j] has the same sign as the column's magnetization:
-        a1[j] = sign_targets[j] * exp(alpha[j])  (so sign(a1[j]) = sign_targets[j])
-
-    Notes
-    -----
-    - If a column has mixed signs (both + and - magnetization), the sign is inferred
-      from the column mean/median. You can pass `sign_targets` explicitly to override.
-    - a2[i] is enforced positive via a2[i] = exp(b2[i]).
+    Constraint:
+        a1[j] = s[j] * exp(alpha[j])   where s[j] ∈ {−1,+1}.
     """
-    M = np.asarray(M, dtype=float)
+    M = np.asarray(M, float)
     R, C = M.shape
-    eps_clip = 1e-6
 
-    # mask & clip
     if mask is None:
         mask = np.isfinite(M)
     else:
         mask = mask & np.isfinite(M)
 
-    M_use = M.copy()
-    M_use[mask] = np.clip(M_use[mask], -1 + eps_clip, 1 - eps_clip)
+    M_use = _clip_m(M, mask)
 
-    # --------- choose sign targets per column ----------
+    # infer sign targets per column if not given
     if sign_targets is None:
         col_stat = np.nanmean(M_use, axis=0) if sign_rule == "mean" else np.nanmedian(M_use, axis=0)
         s = np.sign(col_stat)
-        # fallback: if exactly zero, look at majority sign; default to +1 if still ambiguous
         zero_cols = (s == 0)
         if np.any(zero_cols):
             maj = np.sign(np.nanmean(np.sign(M_use[:, zero_cols]), axis=0))
             s[zero_cols] = np.where(maj == 0, 1.0, maj)
         sign_targets = s.astype(float)
     else:
-        sign_targets = np.asarray(sign_targets, dtype=float)
-        assert sign_targets.shape == (C,)
+        sign_targets = np.sign(np.asarray(sign_targets, float))
         sign_targets[sign_targets == 0] = 1.0
-        sign_targets = np.sign(sign_targets)
 
-    # --------- init a2 (rows) ----------
+    # init a2
     if a2_init is None:
         a2 = np.full(R, 0.6, dtype=float)
     else:
-        a2 = np.asarray(a2_init, dtype=float)
+        a2 = np.asarray(a2_init, float)
         a2[~np.isfinite(a2) | (a2 <= 0)] = 0.6
 
-    # helper
     invM = np.zeros_like(M_use)
     invM[mask] = erfinv(M_use[mask])
 
-    # --------- init a1 (cols) from rearrangement with current a2 ----------
+    # init a1 from rearrangement using current a2
     if a1_init is None:
         a1_guess = np.zeros(C, dtype=float)
         for j in range(C):
@@ -216,17 +215,14 @@ def fit_grid_a1_a2(
                 vals = np.sqrt(2.0) * a2[rows] * invM[rows, j] - M_use[rows, j]
                 vals = vals[np.isfinite(vals)]
                 a1_guess[j] = np.median(vals) if vals.size else 0.0
-            else:
-                a1_guess[j] = 0.0
     else:
-        a1_guess = np.asarray(a1_init, dtype=float)
+        a1_guess = np.asarray(a1_init, float)
         a1_guess[~np.isfinite(a1_guess)] = 0.0
 
-    # convert a1_guess to alpha init respecting sign: a1 = s*exp(alpha) => alpha = log(max(s*a1, tiny))
     tiny = 1e-9
     alpha0 = np.log(np.maximum(sign_targets * a1_guess, tiny))
 
-    # one refinement for a2 with current a1 (using signed a1)
+    # one refinement for a2 with current a1
     a1_signed = sign_targets * np.exp(alpha0)
     for i in range(R):
         cols = mask[i, :]
@@ -238,254 +234,137 @@ def fit_grid_a1_a2(
             if cand.size:
                 a2[i] = np.median(cand)
 
-    # pack params: theta = [alpha(0..C-1), b2(0..R-1)] with
-    # a1 = s * exp(alpha), a2 = exp(b2)
+    # pack params: a1 = s*exp(alpha), a2 = exp(b2)
     b2 = np.log(np.clip(a2, 1e-6, None))
     theta0 = np.concatenate([alpha0, b2])
 
-    # pre-index used entries
     ii, jj = np.where(mask)
     M_flat = M_use[ii, jj]
 
-    # ridge anchors (zeros) for alpha and b2
-    alpha_anchor = np.zeros(C)
-    b2_anchor    = np.zeros(R)
-
     def residuals(theta):
         alpha = theta[:C]
-        b2    = theta[C:]
-        a1    = sign_targets * np.exp(alpha)
-        a2    = np.exp(b2)
-
-        num = M_flat + a1[jj]
-        den = np.sqrt(2.0) * a2[ii]
-        r = erf(num / den) - M_flat
-
+        b2 = theta[C:]
+        a1 = sign_targets * np.exp(alpha)
+        a2 = np.exp(b2)
+        r = erf((M_flat + a1[jj]) / (np.sqrt(2.0) * a2[ii])) - M_flat
         if ridge > 0:
-            r = np.concatenate([
-                r,
-                np.sqrt(ridge) * (alpha - alpha_anchor),
-                np.sqrt(ridge) * (b2    - b2_anchor),
-            ])
+            r = np.concatenate([r, np.sqrt(ridge) * alpha, np.sqrt(ridge) * b2])
         return r
 
-    result = least_squares(
-        residuals, theta0,
+    res = least_squares(
+        residuals,
+        theta0,
         method="trf",
-        loss="soft_l1", f_scale=0.01,
+        loss="soft_l1",
+        f_scale=0.01,
         max_nfev=100000,
-        xtol=1e-12, ftol=1e-12, gtol=1e-12
+        xtol=1e-12,
+        ftol=1e-12,
+        gtol=1e-12,
     )
 
-    th = result.x
-    alpha_hat = th[:C]
-    b2_hat    = th[C:]
-    a1_hat    = sign_targets * np.exp(alpha_hat)
-    a2_hat    = np.exp(b2_hat)
+    th = res.x
+    a1_hat = sign_targets * np.exp(th[:C])
+    a2_hat = np.exp(th[C:])
 
     if verbose:
         print("=== Fit summary (sign-constrained a1) ===")
-        print(f"Shape: {R} rows (a2), {C} cols (a1)")
-        print(f"Cost (1/2||r||^2): {0.5*np.sum(result.fun**2):.6g}")
-        print(f"Success: {result.success}  Message: {result.message}")
+        print(f"Rows (a2): {R}, Cols (a1): {C}")
+        print(f"Cost: {0.5*np.sum(res.fun**2):.6g} | success={res.success}")
 
-    return a1_hat, a2_hat, result
+    return a1_hat, a2_hat, res
 
-def fit_cols_a1_given_a2(M, a2, mask=None, a1_init=None, ridge=0.0, verbose=True):
-    M = np.asarray(M, dtype=float)
-    a2 = np.asarray(a2, dtype=float)
+
+def fit_cols_a1_given_a2(M: np.ndarray, *, a2: np.ndarray, mask: Optional[np.ndarray] = None) -> np.ndarray:
+    """Fit a1[j] given fixed row-wise a2[i]."""
+    M = np.asarray(M, float)
+    a2 = np.asarray(a2, float)
     R, C = M.shape
-    assert a2.shape == (R,), "a2 must have shape (R,)"
-    if not np.all(np.isfinite(a2)) or np.any(a2 <= 0):
-        raise ValueError("All a2 entries must be finite and > 0.")
+    if a2.shape != (R,):
+        raise ValueError(f"a2 must have shape ({R},), got {a2.shape}")
+    if np.any(~np.isfinite(a2)) or np.any(a2 <= 0):
+        raise ValueError("a2 must be finite and > 0.")
 
-    # Mask & clip M for numerical stability
     if mask is None:
         mask = np.isfinite(M)
     else:
         mask = mask & np.isfinite(M)
-    eps_clip = 1e-6
-    M_use = M.copy()
-    M_use[mask] = np.clip(M_use[mask], -1 + eps_clip, 1 - eps_clip)
 
-    # Precompute pieces
-    sqrt2 = np.sqrt(2.0)
+    M_use = _clip_m(M, mask)
     invM = np.zeros_like(M_use)
     invM[mask] = erfinv(M_use[mask])
 
-    # ----- Initial a1 per column (median of rearranged estimates over available rows) -----
-    if a1_init is None:
-        a1 = np.zeros(C, dtype=float)
-        for j in range(C):
-            rows = mask[:, j]
-            if np.any(rows):
-                # from (M + a1)/(sqrt(2)*a2) = erfinv(M)  ⇒  a1 = sqrt(2)*a2*erfinv(M) - M
-                vals = sqrt2 * a2[rows] * invM[rows, j] - M_use[rows, j]
-                vals = vals[np.isfinite(vals)]
-                a1[j] = np.median(vals) if vals.size else 0.0
-            else:
-                a1[j] = 0.0
-    else:
-        a1 = np.asarray(a1_init, dtype=float)
-        a1[~np.isfinite(a1)] = 0.0
+    # init a1 per column
+    a1_0 = np.zeros(C, dtype=float)
+    for j in range(C):
+        rows = mask[:, j]
+        if np.any(rows):
+            vals = np.sqrt(2.0) * a2[rows] * invM[rows, j] - M_use[rows, j]
+            vals = vals[np.isfinite(vals)]
+            a1_0[j] = np.median(vals) if vals.size else 0.0
 
-    # Vectorize used entries for residuals
     ii, jj = np.where(mask)
     M_flat = M_use[ii, jj]
     a2_flat = a2[ii]
 
-    # Optional ridge anchor at 0 for a1
-    a1_anchor = np.zeros(C, dtype=float)
-
     def residuals(a1_vec):
-        num = M_flat + a1_vec[jj]
-        den = sqrt2 * a2_flat
-        r = erf(num / den) - M_flat
-        if ridge > 0:
-            r = np.concatenate([r, np.sqrt(ridge) * (a1_vec - a1_anchor)])
+        r = erf((M_flat + a1_vec[jj]) / (np.sqrt(2.0) * a2_flat)) - M_flat
         return r
 
-    result = least_squares(
+    res = least_squares(
         residuals,
-        a1,
+        a1_0,
         method="trf",
-        loss="soft_l1",   # robust to outliers
+        loss="soft_l1",
         f_scale=0.01,
         max_nfev=100000,
-        xtol=1e-12, ftol=1e-12, gtol=1e-12,
+        xtol=1e-12,
+        ftol=1e-12,
+        gtol=1e-12,
     )
+    return res.x
 
-    a1_hat = result.x
-
-    if verbose:
-        print("=== Fit summary (a1 | given a2) ===")
-        print(f"Rows (a2 given): {R}, Cols (a1): {C}")
-        print(f"Cost (1/2||r||^2): {0.5*np.sum(result.fun**2):.6g}")
-        print(f"Success: {result.success}  Message: {result.message}")
-
-    return a1_hat, result
-
-def fit_rows_a2_given_a1(M, a1, mask=None, a2_init=None, ridge=0.0, verbose=True):
-    M = np.asarray(M, dtype=float)
-    a1 = np.asarray(a1, dtype=float)
-    R, C = M.shape
-    assert a1.shape == (C,), "a1 must have shape (C,)"
-
-    # Build mask and clip M for stability (erfinv and gradients)
-    if mask is None:
-        mask = np.isfinite(M)
-    else:
-        mask = mask & np.isfinite(M)
-    eps_clip = 1e-6
-    M_use = M.copy()
-    M_use[mask] = np.clip(M_use[mask], -1 + eps_clip, 1 - eps_clip)
-
-    # Precompute pieces
-    sqrt2 = np.sqrt(2.0)
-    invM = np.zeros_like(M_use)
-    invM[mask] = erfinv(M_use[mask])
-
-    # ----- Initial a2 per row -----
-    if a2_init is None:
-        a2 = np.full(R, 0.6, dtype=float)
-        for i in range(R):
-            cols = mask[i, :]
-            inv = invM[i, cols]
-            # avoid division near m≈0 where erfinv ≈ 0
-            good = np.abs(inv) > 1e-8
-            if np.any(good):
-                num = M_use[i, cols][good] + a1[cols][good]
-                cand = num / (sqrt2 * inv[good])
-                cand = cand[(cand > 0) & np.isfinite(cand)]
-                if cand.size:
-                    a2[i] = np.median(cand)
-    else:
-        a2 = np.asarray(a2_init, dtype=float)
-        a2[~np.isfinite(a2) | (a2 <= 0)] = 0.6
-
-    # Optimize in log-space: a2 = exp(b2)
-    b2_0 = np.log(np.clip(a2, 1e-6, None))
-
-    # Vectorize data used in residuals
-    ii, jj = np.where(mask)
-    M_flat  = M_use[ii, jj]
-    a1_flat = a1[jj]
-
-    # Optional ridge anchor at 0 for b2 (i.e., a2 anchored at 1)
-    b2_anchor = np.zeros(R, dtype=float)
-
-    def residuals(b2):
-        a2 = np.exp(b2)  # (R,)
-        den = sqrt2 * a2[ii]
-        r = erf((M_flat + a1_flat) / den) - M_flat
-        if ridge > 0:
-            r = np.concatenate([r, np.sqrt(ridge) * (b2 - b2_anchor)])
-        return r
-
-    result = least_squares(
-        residuals,
-        b2_0,
-        method="trf",
-        loss="soft_l1",    # robust to a few outliers
-        f_scale=0.01,
-        max_nfev=100000,
-        xtol=1e-12, ftol=1e-12, gtol=1e-12,
-    )
-
-    a2_hat = np.exp(result.x)
-
-    if verbose:
-        print("=== Fit summary (a2 | given a1) ===")
-        print(f"Rows (a2): {R}, Cols (a1 given): {C}")
-        print(f"Cost (1/2||r||^2): {0.5*np.sum(result.fun**2):.6g}")
-        print(f"Success: {result.success}  Message: {result.message}")
-
-    return a2_hat, result
 
 def fit_rows_a2_given_a1_with_width(
-    M, a1, mask=None, a2_init=None,
-    lam_width=0.0,        # strength of width penalty (0 disables)
-    m_band=0.6,           # focus the width penalty near |m|≈0; larger = wider band
-    a2_floor=0.0,         # hard minimum on a2 (prevents very steep sigmoids)
-    monotone=False,       # enforce a2 nondecreasing across rows
-    verbose=True,
-):
+    M: np.ndarray,
+    *,
+    a1: np.ndarray,
+    mask: Optional[np.ndarray] = None,
+    a2_init: Optional[np.ndarray] = None,
+    lam_width: float = 0.0,
+    m_band: float = 0.6,
+    a2_floor: float = 0.0,
+    monotone: bool = False,
+) -> np.ndarray:
     """
-    Estimate row-wise a2[i] > 0 given a1[j] from:
-        M[i,j] ≈ erf( (M[i,j] + a1[j]) / (sqrt(2) * a2[i]) )
-
-    Adds a differentiable penalty that discourages *steep* transitions by
-    penalizing susceptibility χ = K/(1-K), where K = (√2/√π) e^{-z^2} / a2.
-    The penalty is applied mostly near |m|≈0 via a Gaussian window of width m_band.
+    Fit row-wise a2[i] > 0 given a1[j], with an optional width penalty
+    discouraging steep transitions near |m|≈0.
     """
-    M  = np.asarray(M, float)
+    M = np.asarray(M, float)
     a1 = np.asarray(a1, float)
     R, C = M.shape
-    assert a1.shape == (C,)
+    if a1.shape != (C,):
+        raise ValueError(f"a1 must have shape ({C},), got {a1.shape}")
 
-    # mask & clip
     if mask is None:
         mask = np.isfinite(M)
     else:
         mask = mask & np.isfinite(M)
-    eps_clip = 1e-6
-    M_use = M.copy()
-    M_use[mask] = np.clip(M_use[mask], -1 + eps_clip, 1 - eps_clip)
 
-    sqrt2 = np.sqrt(2.0)
+    M_use = _clip_m(M, mask)
     invM = np.zeros_like(M_use)
     invM[mask] = erfinv(M_use[mask])
 
-    # ----- initializer for a2 (then floor & monotone projection on log-scale) -----
+    # init a2
     if a2_init is None:
         a2 = np.full(R, a2_floor + 1e-6, float)
         for i in range(R):
             cols = mask[i, :]
-            inv  = invM[i, cols]
+            inv = invM[i, cols]
             good = np.abs(inv) > 1e-8
             if np.any(good):
-                num  = M_use[i, cols][good] + a1[cols][good]
-                cand = num / (sqrt2 * inv[good])
+                num = M_use[i, cols][good] + a1[cols][good]
+                cand = num / (np.sqrt(2.0) * inv[good])
                 cand = cand[(cand > 0) & np.isfinite(cand)]
                 if cand.size:
                     a2[i] = max(np.median(cand), a2_floor + 1e-6)
@@ -493,433 +372,334 @@ def fit_rows_a2_given_a1_with_width(
         a2 = np.asarray(a2_init, float)
         a2[~np.isfinite(a2) | (a2 <= 0)] = a2_floor + 1e-6
 
-    # parameterize a2 = a2_floor + exp(b2)  (positivity + floor)
     a2 = np.maximum(a2, a2_floor + 1e-9)
-    b2 = np.log(a2 - a2_floor)
+    b2_0 = np.log(a2 - a2_floor)
 
-    # optional monotone projection on b2
     if monotone and R > 1:
-        b2 = np.maximum.accumulate(b2)
+        b2_0 = np.maximum.accumulate(b2_0)
 
-    theta0 = b2.copy()
-
-    # vectorized data
     ii, jj = np.where(mask)
-    m_obs   = M_use[ii, jj]
+    m_obs = M_use[ii, jj]
     a1_flat = a1[jj]
 
-    def residuals(theta):
-        b2 = theta
+    def residuals(b2):
         if monotone and R > 1:
-            b2 = np.maximum.accumulate(b2 + 1e-8*np.arange(R))
+            b2 = np.maximum.accumulate(b2 + 1e-8 * np.arange(R))
 
-        a2_rows = a2_floor + np.exp(b2)          # (R,)
-        den = sqrt2 * a2_rows[ii]
-
-        # data residuals (same as before)
+        a2_rows = a2_floor + np.exp(b2)
+        den = np.sqrt(2.0) * a2_rows[ii]
         r_data = erf((m_obs + a1_flat) / den) - m_obs
 
-        regs = [r_data]
+        if lam_width <= 0:
+            return r_data
 
-        # ---- width penalty (discourage steepness) ----
-        if lam_width > 0:
-            # Evaluate susceptibility χ at the OBSERVED m (no inner solve needed)
-            z  = (m_obs + a1_flat) / den
-            K  = (np.sqrt(2.0/np.pi) * np.exp(-z*z)) / a2_rows[ii]
-            Kc = np.clip(K, -0.99, 0.99)          # numerical safety near 1
-            chi = Kc / (1.0 - Kc)                 # χ = K/(1-K)
-            w   = np.exp(-(m_obs / m_band)**2)    # emphasizes the transition band
-            r_width = np.sqrt(lam_width) * w * chi
-            regs.append(r_width)
+        z = (m_obs + a1_flat) / den
+        K = (np.sqrt(2.0 / np.pi) * np.exp(-z * z)) / a2_rows[ii]
+        K = np.clip(K, -0.99, 0.99)
+        chi = K / (1.0 - K)
+        w = np.exp(-((m_obs / m_band) ** 2))
+        r_width = np.sqrt(lam_width) * w * chi
 
-        return np.concatenate(regs)
+        return np.concatenate([r_data, r_width])
 
     res = least_squares(
-        residuals, theta0,
+        residuals,
+        b2_0,
         method="trf",
-        loss="soft_l1", f_scale=0.01,
+        loss="soft_l1",
+        f_scale=0.01,
         max_nfev=100000,
-        xtol=1e-12, ftol=1e-12, gtol=1e-12
+        xtol=1e-12,
+        ftol=1e-12,
+        gtol=1e-12,
     )
 
-    a2_hat = a2_floor + np.exp(res.x)
+    return a2_floor + np.exp(res.x)
 
-    if verbose:
-        print("=== Fit summary (a2 with width penalty) ===")
-        print(f"Rows: {R}  Cost: {0.5*np.sum(res.fun**2):.6g}")
-        print(f"Success: {res.success}  Message: {res.message}")
 
-    return a2_hat, res
+# =============================================================================
+# Polynomial fits with nonnegative slope/intercept
+# =============================================================================
+def fit_linear_nonneg(x: np.ndarray, y: np.ndarray) -> np.ndarray:
+    """
+    Fit y ≈ c1*x + c0 with c1>=0 and c0>=0.
+    Returns coeffs in np.polyval order: [c1, c0].
+    """
+    x = np.asarray(x, float)
+    y = np.asarray(y, float)
 
-# %%
-m_datasets = top_values_mean * 2 - 1
+    def resid(c):
+        return np.polyval(c, x) - y
 
-# --- Initial joint fit (optional but helpful)
-a1_hat0, a2_hat0, _ = fit_grid_a1_a2(
-    m_datasets,
-    a2_init=np.zeros(len(m_datasets)),  # rows
-    ridge=1e-4,
-    verbose=False
-)
-
-# Helper: constrained quadratic fit for a2 with c1 >= 0
-def fit_quad_c1_nonneg(x, y):
-    def resid(c, x_, y_):  # c = [c2, c1, c0] (np.polyfit order: high->low)
-        return np.polyval(c, x_) - y_
-    c0 = np.polyfit(x, y, 2).astype(float)
-    c0[1] = max(c0[1], 0.0)               # project seed inside bounds
-    lb = [0.0, 0.0, 0.0]
-    ub = [ np.inf,  np.inf,  np.inf]
-    res = least_squares(resid, c0, bounds=(lb, ub), args=(x, y))
-    return res.x
-
-def fit_lin_c1_nonneg(x, y):
-    def resid(c, x_, y_):  # c = [c1, c0] (np.polyfit order: high->low)
-        return np.polyval(c, x_) - y_
     c0 = np.polyfit(x, y, 1).astype(float)
-    c0[1] = max(c0[1], 0.0)               # project seed inside bounds
+    c0[0] = max(c0[0], 0.0)
+    c0[1] = max(c0[1], 0.0)
+
     lb = [0.0, 0.0]
-    ub = [ np.inf,  np.inf]
-    res = least_squares(resid, c0, bounds=(lb, ub), args=(x, y))
+    ub = [np.inf, np.inf]
+    res = least_squares(resid, c0, bounds=(lb, ub))
     return res.x
 
-# Initialize coeffs from the initial hats
-coeffs_a1 = np.polyfit(Mws, a1_hat0, 2)
-# coeffs_a2 = fit_quad_c1_nonneg(covs, a2_hat0)
-coeffs_a2 = fit_lin_c1_nonneg(covs, a2_hat0)
 
-# Iteration settings
-a1_prev = a1_hat0.copy()
-a2_prev = a2_hat0.copy()
-tol = 1e-8
-count = 0
-max_count = 1000
-eta = 1.0  # 1.0: No damping, 0.0: No update (0 < eta <= 1.0)
+def find_real_root_in_range(coeffs: np.ndarray, lo: float, hi: float) -> float:
+    """Pick a real root of a polynomial within [lo, hi]."""
+    roots = np.roots(coeffs)
+    roots_real = roots[np.isclose(roots.imag, 0.0, atol=1e-8)].real
+    in_rng = roots_real[(roots_real >= lo) & (roots_real <= hi)]
+    if in_rng.size:
+        # choose the one closest to mid-range (or you can choose closest to 0 crossing)
+        mid = 0.5 * (lo + hi)
+        return float(in_rng[np.argmin(np.abs(in_rng - mid))])
 
-while count < max_count:
-    # ----- update a1 given a2(poly) -----
-    a2_on_cov = np.polyval(coeffs_a2, covs)
-    a2_on_cov = np.clip(a2_on_cov, 1e-8, None)  # positivity
-    a1_new, _ = fit_cols_a1_given_a2(m_datasets, a2=a2_on_cov, verbose=False)
-    coeffs_a1 = np.polyfit(Mws, a1_new, 2)
-
-    # ----- update a2 given a1(poly) -----
-    a1_on_Mw = np.polyval(coeffs_a1, Mws)
-    # a2_new, _ = fit_rows_a2_given_a1(m_datasets, a1=a1_on_Mw, verbose=False)
-    a2_new, _ = fit_rows_a2_given_a1_with_width(
-        m_datasets, a1=a1_on_Mw,# a2_init=a2_prev,
-        lam_width=1e-2,      # ↑ increases width (try 1e-3 → 1e-1)
-        m_band=0.6,          # where to focus the penalty (|m|≈0)
-        a2_floor=0.0,        # impose hard minimum value for a2
-        monotone=True,       # impose monotonicity
-        verbose=False
-    )
-    # coeffs_a2 = fit_quad_c1_nonneg(covs, a2_new)
-    coeffs_a2 = fit_lin_c1_nonneg(covs, a2_new)
-
-    # diffs (MSE)
-    diff1 = float(np.mean((a1_prev - a1_new) ** 2))
-    diff2 = float(np.mean((a2_prev - a2_new) ** 2))
-    print(count, diff1, diff2)
-
-    # numerical damping
-    a1_prev = (1 - eta) * a1_prev + eta * a1_new
-    a2_prev = (1 - eta) * a2_prev + eta * a2_new
-
-    # convergence check
-    if max(diff1, diff2) <= tol:
-        break
-    count += 1
-
-print("done:", count, diff1, diff2)
-
-# %%
-outdir = Path("C:/Users/ohsb1/OneDrive/UCB/Research/Phase transitions in regional seismic responses/Paper/Figures")
-outdir.mkdir(exist_ok=True)
-
-fig, ax = plt.subplots(figsize=(6,6))
-ax.plot(Mws, a1_prev, 'r.', label=r'Estimated $a_{1}$')
-ax.plot(Mws, coeffs_a1[0]*Mws**2 + coeffs_a1[1]*Mws + coeffs_a1[2], 'k--', label='Fitted curve (quadratic)', linewidth=2.0)
-ax.set_xticks([4, 5, 6, 7, 8])
-ax.set_yticks([-3, -2, -1, 0, 1, 2])
-ax.set_xlabel(r"Earthquake magnitude $M_{w}$", fontsize=20)
-ax.set_ylabel(r"$a_{1}\,\left(=H/J\right)$", fontsize=20)
-ax.tick_params(axis='both', labelsize=16)
-ax.grid(True, linestyle="--", alpha=0.7, linewidth=1.0)
-ax.spines[['top', 'right']].set_visible(False)
-ax.legend(frameon=False, fontsize=20)
-if SaveFig:
-    fname = f"{outdir}/param_est_Mw_to_a1.png"
-    fig.savefig(fname, dpi=300, transparent=True, bbox_inches='tight')
-    print(f"Saved figure: {fname}")
-plt.show()
-
-roots = np.roots(coeffs_a1)
-Mw_c = roots[1]
-print(f"Critical magnitude Mw: {Mw_c:.3f}")
-
-# plt.figure(figsize=(6,4))
-# plt.plot(covs, a2_prev, '.', label='data (a2_hat)')
-# plt.plot(covs, coeffs_a2[0]*covs**2 + coeffs_a2[1]*covs + coeffs_a2[2],
-#          label='quadratic fit (c1 ≥ 0)', color='C1')
-# plt.xlabel("COV")
-# plt.ylabel("a2_hat")
-# plt.legend()
-# plt.show()
-
-fig, ax = plt.subplots(figsize=(6,6))
-ax.plot(covs, a2_prev, 'r.', label=r'Estimated $a_{2}$')
-ax.plot(covs, coeffs_a2[0]*covs + coeffs_a2[1], 'k--', label='Fitted curve (linear)', linewidth=2.0)
-ax.set_xticks([0.6, 0.7, 0.8, 0.9, 1.0])
-# ax.set_yticks([-3, -2, -1, 0, 1, 2])
-ax.set_xlabel(r"Structural diversity $\sigma$", fontsize=20)
-ax.set_ylabel(r"$a_{2}\,\left(=\Delta/J\right)$", fontsize=20)
-ax.tick_params(axis='both', labelsize=16)
-ax.grid(True, linestyle="--", alpha=0.7, linewidth=1.0)
-ax.spines[['top', 'right']].set_visible(False)
-ax.legend(frameon=False, fontsize=20)
-if SaveFig:
-    fname = f"{outdir}/param_est_sigma_to_a2.png"
-    fig.savefig(fname, dpi=300, transparent=True, bbox_inches='tight')
-    print(f"Saved figure: {fname}")
-plt.show()
-
-a2_c = np.sqrt(2/np.pi)
-cov_c = (a2_c - coeffs_a2[1]) / coeffs_a2[0]
-print(f"Critical diversity σ = {cov_c:.3f}")
+    # fallback: choose the real root with smallest imaginary part
+    idx = int(np.argmin(np.abs(roots.imag)))
+    return float(roots[idx].real)
 
 
-# %%
-
-# Mws = Mws_orig.copy()
-# covs = covs_orig.copy()
-
-Mws = np.linspace(Mws_orig.min(), Mws_orig.max(), RESOLUTION)
-covs = np.linspace(covs_orig.min(), covs_orig.max(), RESOLUTION)
-
-top_values_mean = top_values_mean_orig.copy()
-m_datasets = top_values_mean * 2 - 1
-
-a1_of_Mw  = np.polyval(coeffs_a1, Mws)               # (101,)
-a2_of_cov = np.clip(np.polyval(coeffs_a2, covs), 1e-12, None)  # (101,)
-
-Mw_grid, cov_grid = np.meshgrid(Mws, covs, indexing="xy")
-a1_grid = np.tile(a1_of_Mw, (covs.size, 1))          # (rows, cols)
-a2_grid = np.tile(a2_of_cov[:, None], (1, Mws.size)) # (rows, cols)
-
-sqrt2 = np.sqrt(2.0)
-
-def fixed_point_solve(a1g, a2g, m0, tol=1e-8, max_iter=10000, omega=1.0, newton_polish=5):
+# =============================================================================
+# Fixed-point solver for phase diagram
+# =============================================================================
+def fixed_point_solve(
+    a1g: np.ndarray,
+    a2g: np.ndarray,
+    m0: np.ndarray,
+    *,
+    tol: float = 1e-8,
+    max_iter: int = 10000,
+    omega: float = 1.0,
+) -> np.ndarray:
+    """Vectorized fixed-point iteration for m = erf((m+a1)/(sqrt(2)*a2))."""
+    sqrt2 = np.sqrt(2.0)
     m = m0.copy()
     prev_delta = np.inf
-    iters = 0
-    for it in range(max_iter):
+    w = float(omega)
+
+    for _ in range(max_iter):
         rhs = erf((m + a1g) / (sqrt2 * a2g))
-        m_new = (1 - omega) * m + omega * rhs
-        delta = np.max(np.abs(m_new - m))
+        m_new = (1 - w) * m + w * rhs
+        delta = float(np.max(np.abs(m_new - m)))
         m = m_new
-        iters = it + 1
-        # simple adaptive damping if we start to bounce
-        if delta > prev_delta * 1.05 and omega > 0.2:
-            omega *= 0.9
+
+        if delta > prev_delta * 1.05 and w > 0.2:
+            w *= 0.9
         prev_delta = delta
+
         if delta < tol:
             break
 
-    # # Newton polish on f(m)=erf((m+a1)/s)-m=0 with s=sqrt(2)*a2
-    # s = sqrt2 * a2g
-    # for _ in range(newton_polish):
-    #     z = (m + a1g) / s
-    #     f = erf(z) - m
-    #     # f'(m) = (2/sqrt(pi)) * exp(-z^2) * (1/s) - 1
-    #     fp = (2.0/np.sqrt(np.pi)) * np.exp(-z*z) * (1.0/s) - 1.0
-    #     # safe Newton step with clipping
-    #     step = np.where(np.abs(fp) > 1e-10, f / fp, 0.0)
-    #     step = np.clip(step, -0.5, 0.5)  # tame huge steps near tanh-like steepness
-    #     m -= step
-    #     if np.max(np.abs(step)) < tol:
-    #         break
-
-    return np.clip(m, -1.0, 1.0), iters
-
-# Solve from both branches
-m_plus0  = np.ones_like(a1_grid)
-m_minus0 = -np.ones_like(a1_grid)
-
-m_plus, it_plus   = fixed_point_solve(a1_grid, a2_grid, m_plus0)
-m_minus, it_minus = fixed_point_solve(a1_grid, a2_grid, m_minus0)
-
-damage_plus  = 0.5 * (m_plus  + 1.0)
-damage_minus = 0.5 * (m_minus + 1.0)
-
-# Bistability map: cells where branches disagree by > eps
-eps = 1e-4
-bistable = (np.abs(m_plus - m_minus) > eps).astype(float)
-
-# Equilibrium damage
-tol = 1e-12
-damage_eq = np.where(a1_grid > tol, damage_plus,
-                     np.where(a1_grid < -tol, damage_minus,
-                              0.5*(damage_plus + damage_minus)))
-
-# %%
-from matplotlib.colors import ListedColormap
-import matplotlib.patches as mpatches
-import matplotlib.lines as mlines
-import matplotlib.colors as colors
-
-MAGS, COVS = np.meshgrid(Mws, covs)
-
-vmin = 0.0
-vmax = 1.0
-
-base_cmap = plt.cm.gray_r(np.linspace(0, 1, 256))
-base_cmap[:, -1] = np.linspace(0, 0.6, 256)  # last column is alpha channel (0→transparent, 0.5→semi)
-transparent_gray = ListedColormap(base_cmap)
-
-fig, ax = plt.subplots(figsize=(7, 6), dpi=300)
-c = ax.contourf(
-    COVS, MAGS, damage_eq, 
-    levels=100, 
-    cmap="RdYlBu_r", 
-    vmin=vmin, vmax=vmax, zorder=1,
-    # norm = colors.BoundaryNorm(boundaries=np.linspace(0,1,20), ncolors=256),
-)
-
-# c = ax.imshow(
-#     top_values_mean.T,
-#     origin="lower",
-#     extent=[COVS.min(), COVS.max(), MAGS.min(), MAGS.max()],
-#     aspect="auto",
-#     cmap="RdYlBu_r", 
-#     vmin=vmin, vmax=vmax,
-#     interpolation="none"   # critical: no blending between pixels
-# )
+    return np.clip(m, -1.0, 1.0)
 
 
-# Transition boundary (critical Mw values)
-ax.plot([0.0, cov_c], [Mw_c, Mw_c], '-', linewidth=2.0, color="white", zorder=3, label='Transition boundary')
-
-# Critical sigma value (critical point)
-ax.plot(cov_c, Mw_c, 'o', ms=10, markerfacecolor="black", markeredgecolor="white", zorder=5, label='Critical point')
-
-# Bistable regime
-c2 = ax.contourf(
-    COVS, MAGS, (np.abs(m_plus - m_minus) > 1e-4).astype(float), 
-    levels=10, 
-    cmap=transparent_gray,
-    vmin=vmin, vmax=vmax, zorder=4
-)
-
-# Contour levels and label positions
-# levels = [0.01, 0.05, 0.1, 0.9, 0.95, 0.99]
-# label_positions = [(0.85, 6.5), (0.86, 6.5), (0.87, 6.5), (0.85, 6.5), (0.84, 6.5), (0.84, 6.5)]
-levels = [0.05, 0.1, 0.9, 0.95]
-label_positions = [(0.86, 6.5), (0.87, 6.5), (0.85, 6.5), (0.84, 6.5)]
-
-# Draw contours and labels
-for lvl, pos in zip(levels, label_positions):
-    cs = ax.contour(
-        COVS, MAGS, damage_eq,
-        levels=[lvl],
-        colors='black',
-        linewidths=0.5,
-        linestyles='--',
-        zorder=2
+# =============================================================================
+# Main workflow
+# =============================================================================
+def main() -> None:
+    # --- 1) Load DV summaries ---
+    top_values_mean = load_top_values_mean(
+        region=TARGET_REGION,
+        structure=TARGET_STRUCTURE,
+        mws=MWS,
+        sigmas=SIGMAS,
+        bins=HIST_BINS,
+        top_mass_frac=TOP_MASS_FRAC,
+        num_sim=NUM_SIM,
     )
-    ax.clabel(cs, fmt=f'{lvl:.2f}', fontsize=14, inline=True, manual=[pos])
+    print("Damage simulation data loaded\n")
 
-# --- Custom Legend Elements ---
-# bistable_patch = mpatches.Patch(color='gray', alpha=0.8, label='Bistable regime')
-bistable_patch = mpatches.Patch(color='gray', alpha=0.8, label='Bistable regime')
-transition_line = mlines.Line2D([], [], color='black', linestyle='--', linewidth=2, label='Transition boundary')
-critical_marker = mlines.Line2D([], [], color='black', marker='o', markerfacecolor='black',
-                                markeredgecolor='white', markersize=10, linestyle='None', label='Critical point')
+    # Keep originals for plotting grids
+    top_values_mean_orig = top_values_mean.copy()
+    mws_orig = MWS.copy()
+    sigmas_orig = SIGMAS.copy()
 
-# Add legend (custom handles)
-# legend = ax.legend(
-#     handles=[bistable_patch, transition_line, critical_marker],
-#     fontsize=16,
-#     loc='upper left',
-#     frameon=True,
-# )
-# legend.get_frame().set_boxstyle('square', pad=0.0)
-# legend.get_frame().set_facecolor('white')
-# legend.get_frame().set_edgecolor('black')
-# legend.get_frame().set_alpha(1.0)
+    # --- 2) Choose subset for fitting (match your earlier behavior) ---
+    sigmas_fit = sigmas_orig[SIGMA_FIT_START_IDX:]
+    top_fit = top_values_mean_orig[SIGMA_FIT_START_IDX:, :]
+    m_data = top_fit * 2.0 - 1.0  # map DV ∈ [0,1] to m ∈ [-1,1]
 
-# # --- Colorbar and labels ---
-cb = plt.colorbar(c, ax=ax)
-cb.set_label('Damage fraction', fontsize=20)
-cb.set_ticks([vmin, (vmin + vmax) / 2, vmax])
-cb.set_ticklabels(["0.0", "0.5", "1.0"])
-# cb.set_ticklabels(["Ordered", "Disordered", "Ordered"])
-cb.ax.tick_params(labelsize=16)
+    # --- 3) Initial joint fit (a1 per Mw column, a2 per sigma row) ---
+    a1_hat0, a2_hat0, _ = fit_grid_a1_a2(
+        m_data,
+        a2_init=np.zeros(m_data.shape[0]),
+        ridge=RIDGE,
+        verbose=False,
+    )
 
-ax.set_xlabel(r'Structural diversity $\sigma$', fontsize=20)
-ax.set_xticks([0.0, 0.5, 1.0])
-ax.set_xticklabels(["0.0", "0.5", "1.0"])
-# ax.set_xticklabels(["Low", "High"])
-# ax.set_yticks([3.5, 7.7])
-# ax.set_yticklabels(["Weak", "Strong"])
-ax.set_ylabel(r'Earthquake magnitude $M_w$', fontsize=20)
-ax.tick_params(axis="both", labelsize=16)
+    # --- 4) Initialize smooth parameterizations ---
+    coeffs_a1 = np.polyfit(mws_orig, a1_hat0, 2)          # quadratic in Mw
+    coeffs_a2 = fit_linear_nonneg(sigmas_fit, a2_hat0)    # linear in sigma, slope>=0, intercept>=0
 
-for label in ax.get_xticklabels():
-    if label.get_text() == "Low":
-        label.set_ha("left")   # align left edge to tick
-    elif label.get_text() == "High":
-        label.set_ha("right")  # align right edge to tick
+    # --- 5) Alternating refinement ---
+    a1_prev = a1_hat0.copy()
+    a2_prev = a2_hat0.copy()
 
-for label in ax.get_yticklabels():
-    if label.get_text() == "Weak":
-        label.set_va("bottom") # move slightly upward
-    elif label.get_text() == "Strong":
-        label.set_va("top")    # move slightly downward
+    print("Parameter fitting starts")
+    for it in range(MAX_ITERS):
+        a2_on_sigma = np.clip(np.polyval(coeffs_a2, sigmas_fit), 1e-8, None)
+        a1_new = fit_cols_a1_given_a2(m_data, a2=a2_on_sigma)
+        coeffs_a1 = np.polyfit(mws_orig, a1_new, 2)
 
-fig.tight_layout()
+        a1_on_mw = np.polyval(coeffs_a1, mws_orig)
+        a2_new = fit_rows_a2_given_a1_with_width(
+            m_data,
+            a1=a1_on_mw,
+            lam_width=LAM_WIDTH,
+            m_band=M_BAND,
+            a2_floor=A2_FLOOR,
+            monotone=ENFORCE_MONOTONE_A2,
+        )
+        coeffs_a2 = fit_linear_nonneg(sigmas_fit, a2_new)
 
-if SaveFig:
-    plt.savefig(f"{outdir}/phase_diagram_RFIM_bistable_clean.png", dpi=300, transparent=True, bbox_inches='tight')
-    print("Saved phase_diagram_RFIM_bistable.png")
+        diff1 = float(np.mean((a1_prev - a1_new) ** 2))
+        diff2 = float(np.mean((a2_prev - a2_new) ** 2))
+        print(it, diff1, diff2)
 
-plt.show()
+        a1_prev = (1 - ETA) * a1_prev + ETA * a1_new
+        a2_prev = (1 - ETA) * a2_prev + ETA * a2_new
+
+        if max(diff1, diff2) <= TOL:
+            break
+
+    print("done:", it, diff1, diff2)
+
+    FIG_DIR.mkdir(parents=True, exist_ok=True)
+
+    # --- 6) Plot a1(Mw) ---
+    fig, ax = plt.subplots(figsize=(6, 6))
+    ax.plot(mws_orig, a1_prev, "r.", label=r"Estimated $a_{1}$")
+    ax.plot(mws_orig, np.polyval(coeffs_a1, mws_orig), "k--", lw=2.0, label="Quadratic fit")
+    ax.set_xticks([4, 5, 6, 7, 8])
+    ax.set_yticks([-3, -2, -1, 0, 1, 2])
+    ax.set_xlabel(r"Earthquake magnitude $M_{w}$", fontsize=20)
+    ax.set_ylabel(r"$a_{1}\,\left(=H/J\right)$", fontsize=20)
+    ax.tick_params(axis="both", labelsize=16)
+    ax.grid(True, linestyle="--", alpha=0.7, linewidth=1.0)
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.legend(frameon=False, fontsize=18)
+    fig.tight_layout()
+    if SaveFig:
+        out = FIG_DIR / "param_est_Mw_to_a1.png"
+        fig.savefig(out, dpi=300, transparent=True, bbox_inches="tight")
+        print(f"Saved: {out}")
+    plt.show()
+
+    # critical Mw: a1(Mw)=0
+    Mw_c = find_real_root_in_range(coeffs_a1, float(mws_orig.min()), float(mws_orig.max()))
+    print(f"Critical magnitude Mw: {Mw_c:.3f}")
+
+    # --- 7) Plot a2(sigma) ---
+    fig, ax = plt.subplots(figsize=(6, 6))
+    ax.plot(sigmas_fit, a2_prev, "r.", label=r"Estimated $a_{2}$")
+    ax.plot(sigmas_fit, np.polyval(coeffs_a2, sigmas_fit), "k--", lw=2.0, label="Linear fit")
+    ax.set_xticks([0.6, 0.7, 0.8, 0.9, 1.0])
+    ax.set_xlabel(r"Structural diversity $\sigma$", fontsize=20)
+    ax.set_ylabel(r"$a_{2}\,\left(=\Delta/J\right)$", fontsize=20)
+    ax.tick_params(axis="both", labelsize=16)
+    ax.grid(True, linestyle="--", alpha=0.7, linewidth=1.0)
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.legend(frameon=False, fontsize=18)
+    fig.tight_layout()
+    if SaveFig:
+        out = FIG_DIR / "param_est_sigma_to_a2.png"
+        fig.savefig(out, dpi=300, transparent=True, bbox_inches="tight")
+        print(f"Saved: {out}")
+    plt.show()
+
+    # critical sigma from a2(sigma)=sqrt(2/pi)
+    a2_c = np.sqrt(2 / np.pi)
+    c1, c0 = coeffs_a2  # a2 = c1*sigma + c0
+    sigma_c = (a2_c - c0) / c1 if c1 > 0 else np.nan
+    print(f"Critical diversity σ = {sigma_c:.3f}")
+
+    # --- 8) Phase diagram grid ---
+    mws_grid = np.linspace(mws_orig.min(), mws_orig.max(), RESOLUTION)
+    sigmas_grid = np.linspace(sigmas_orig.min(), sigmas_orig.max(), RESOLUTION)
+
+    a1_of_mw = np.polyval(coeffs_a1, mws_grid)
+    a2_of_sigma = np.clip(np.polyval(coeffs_a2, sigmas_grid), 1e-12, None)
+
+    Mw_grid, Sigma_grid = np.meshgrid(mws_grid, sigmas_grid, indexing="xy")
+    a1_grid = np.tile(a1_of_mw, (sigmas_grid.size, 1))
+    a2_grid = np.tile(a2_of_sigma[:, None], (1, mws_grid.size))
+
+    # Solve from both branches
+    m_plus = fixed_point_solve(a1_grid, a2_grid, np.ones_like(a1_grid))
+    m_minus = fixed_point_solve(a1_grid, a2_grid, -np.ones_like(a1_grid))
+
+    damage_plus = 0.5 * (m_plus + 1.0)
+    damage_minus = 0.5 * (m_minus + 1.0)
+
+    # bistability mask
+    eps_bi = 1e-4
+    bistable = (np.abs(m_plus - m_minus) > eps_bi).astype(float)
+
+    # equilibrium damage (choose branch by sign of a1; average at a1≈0)
+    tol0 = 1e-12
+    damage_eq = np.where(
+        a1_grid > tol0,
+        damage_plus,
+        np.where(a1_grid < -tol0, damage_minus, 0.5 * (damage_plus + damage_minus)),
+    )
+
+    # --- 9) Plot phase diagram ---
+    SIG, MAG = np.meshgrid(sigmas_grid, mws_grid)
+
+    vmin, vmax = 0.0, 1.0
+    base = plt.cm.gray_r(np.linspace(0, 1, 256))
+    base[:, -1] = np.linspace(0, 0.6, 256)
+    transparent_gray = ListedColormap(base)
+
+    fig, ax = plt.subplots(figsize=(7, 6), dpi=300)
+    c = ax.contourf(
+        SIG,
+        MAG,
+        damage_eq.T,
+        levels=100,
+        cmap="RdYlBu_r",
+        vmin=vmin,
+        vmax=vmax,
+        zorder=1,
+    )
+
+    # Transition boundary and critical point
+    ax.plot([0.0, sigma_c], [Mw_c, Mw_c], "-", lw=2.0, color="white", zorder=3)
+    ax.plot(sigma_c, Mw_c, "o", ms=10, markerfacecolor="black", markeredgecolor="white", zorder=5)
+
+    # Bistable overlay
+    ax.contourf(
+        SIG,
+        MAG,
+        bistable.T,
+        levels=10,
+        cmap=transparent_gray,
+        vmin=vmin,
+        vmax=vmax,
+        zorder=4,
+    )
+
+    # Contour labels
+    levels = [0.05, 0.1, 0.9, 0.95]
+    label_positions = [(0.86, 6.5), (0.87, 6.5), (0.85, 6.5), (0.84, 6.5)]
+    for lvl, pos in zip(levels, label_positions):
+        cs = ax.contour(SIG, MAG, damage_eq.T, levels=[lvl], colors="black", linewidths=0.5, linestyles="--", zorder=2)
+        ax.clabel(cs, fmt=f"{lvl:.2f}", fontsize=14, inline=True, manual=[pos])
+
+    cb = plt.colorbar(c, ax=ax)
+    cb.set_label("Damage fraction", fontsize=20)
+    cb.set_ticks([0.0, 0.5, 1.0])
+    cb.ax.tick_params(labelsize=16)
+
+    ax.set_xlabel(r"Structural diversity $\sigma$", fontsize=20)
+    ax.set_xticks([0.0, 0.5, 1.0])
+    ax.set_ylabel(r"Earthquake magnitude $M_w$", fontsize=20)
+    ax.tick_params(axis="both", labelsize=16)
+
+    fig.tight_layout()
+    if SaveFig:
+        out = FIG_DIR / "phase_diagram_RFIM_bistable_clean.png"
+        fig.savefig(out, dpi=300, transparent=True, bbox_inches="tight")
+        print(f"Saved: {out}")
+    plt.show()
 
 
-
-# %% Save the estimated coefficients
-# np.save("coeffs_a1.npy", coeffs_a1)
-# np.save("coeffs_a2.npy", coeffs_a2)
-# print("Saved coeffs_a1.npy and coeffs_a2.npy")
-
-# # %%
-# MAGS, COVS = np.meshgrid(Mws, covs)
-
-
-# fig, ax = plt.subplots(figsize=(10, 6))
-# c = ax.contourf(
-#     COVS, MAGS, damage_eq-top_values_mean, 
-#     levels=100, 
-#     cmap="bone",
-# )
-
-# # --- Colorbar and labels ---
-# cb = plt.colorbar(c, ax=ax)
-# cb.set_label('Damage fraction', fontsize=20)
-# # cb.set_ticks([vmin, (vmin + vmax) / 2, vmax])
-# # cb.set_ticklabels(["0.0", "0.5", "1.0"])
-# cb.ax.tick_params(labelsize=16)
-
-# ax.set_xlabel('Structural diversity', fontsize=20)
-# ax.set_xticks([0.0, 1.0])
-# ax.set_xticklabels(["Low", "High"])
-# ax.set_ylabel('Earthquake magnitude', fontsize=20)
-# ax.tick_params(axis="both", labelsize=16)
-
-# fig.tight_layout()
-
-# if SaveFig:
-#     plt.savefig("phase_diagram_RFIM_bistable.png", dpi=300, transparent=True, bbox_inches='tight')
-#     print("Saved phase_diagram_RFIM_bistable.png")
-
-# plt.show()
+if __name__ == "__main__":
+    main()
