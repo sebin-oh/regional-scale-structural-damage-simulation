@@ -40,7 +40,7 @@ FIG_DIR = Path("../results")
 USE_SAVED_PARAMS = True          # if True and file exists -> skip estimation and load coeffs
 SAVE_PARAMS_AFTER_FIT = True     # if True -> save coeffs after estimating
 
-RFIM_PARAMS_PATH = Path("../data/rfim_params_est/{TARGET_REGION}_{TARGET_STRUCTURE}_rfim_coeffs.npz")
+RFIM_PARAMS_PATH = Path(f"../data/rfim_params_est/{TARGET_REGION}_{TARGET_STRUCTURE}_rfim_coeffs.npz")
 
 MWS = np.round(np.arange(3.5, 8.51, 0.05), 2)
 SIGMAS = np.round(np.arange(0.0, 1.001, 0.01), 3)
@@ -549,6 +549,8 @@ def fixed_point_solve(
 # Main workflow
 # =============================================================================
 def main() -> None:
+    FIG_DIR.mkdir(parents=True, exist_ok=True)
+
     # --- Load saved coeffs if requested ---
     if USE_SAVED_PARAMS and RFIM_PARAMS_PATH.exists():
         coeffs_a1, coeffs_a2, meta = load_mf_params(RFIM_PARAMS_PATH)
@@ -635,48 +637,46 @@ def main() -> None:
             save_mf_params(RFIM_PARAMS_PATH, coeffs_a1=coeffs_a1, coeffs_a2=coeffs_a2, meta=meta)
             print(f"Saved mean-field RFIM parameters: {RFIM_PARAMS_PATH}")
 
-    FIG_DIR.mkdir(parents=True, exist_ok=True)
+        # --- 6) Plot a1(Mw) ---
+        fig, ax = plt.subplots(figsize=(6, 6))
+        ax.plot(mws_orig, a1_prev, "r.", label=r"Estimated $a_{1}$")
+        ax.plot(mws_orig, np.polyval(coeffs_a1, mws_orig), "k--", lw=2.0, label="Quadratic fit")
+        ax.set_xticks([4, 5, 6, 7, 8])
+        ax.set_yticks([-3, -2, -1, 0, 1, 2])
+        ax.set_xlabel(r"Earthquake magnitude $M_{w}$", fontsize=20)
+        ax.set_ylabel(r"$a_{1}\,\left(=H/J\right)$", fontsize=20)
+        ax.tick_params(axis="both", labelsize=16)
+        ax.grid(True, linestyle="--", alpha=0.7, linewidth=1.0)
+        ax.spines[["top", "right"]].set_visible(False)
+        ax.legend(frameon=False, fontsize=18)
+        fig.tight_layout()
+        if SaveFig:
+            out = FIG_DIR / "param_est_Mw_to_a1.png"
+            fig.savefig(out, dpi=300, transparent=True, bbox_inches="tight")
+            print(f"Saved: {out}")
+        plt.show()
 
-    # --- 6) Plot a1(Mw) ---
-    fig, ax = plt.subplots(figsize=(6, 6))
-    ax.plot(mws_orig, a1_prev, "r.", label=r"Estimated $a_{1}$")
-    ax.plot(mws_orig, np.polyval(coeffs_a1, mws_orig), "k--", lw=2.0, label="Quadratic fit")
-    ax.set_xticks([4, 5, 6, 7, 8])
-    ax.set_yticks([-3, -2, -1, 0, 1, 2])
-    ax.set_xlabel(r"Earthquake magnitude $M_{w}$", fontsize=20)
-    ax.set_ylabel(r"$a_{1}\,\left(=H/J\right)$", fontsize=20)
-    ax.tick_params(axis="both", labelsize=16)
-    ax.grid(True, linestyle="--", alpha=0.7, linewidth=1.0)
-    ax.spines[["top", "right"]].set_visible(False)
-    ax.legend(frameon=False, fontsize=18)
-    fig.tight_layout()
-    if SaveFig:
-        out = FIG_DIR / "param_est_Mw_to_a1.png"
-        fig.savefig(out, dpi=300, transparent=True, bbox_inches="tight")
-        print(f"Saved: {out}")
-    plt.show()
+        # critical Mw: a1(Mw)=0
+        Mw_c = find_real_root_in_range(coeffs_a1, float(mws_orig.min()), float(mws_orig.max()))
+        print(f"Critical magnitude Mw: {Mw_c:.3f}")
 
-    # critical Mw: a1(Mw)=0
-    Mw_c = find_real_root_in_range(coeffs_a1, float(mws_orig.min()), float(mws_orig.max()))
-    print(f"Critical magnitude Mw: {Mw_c:.3f}")
-
-    # --- 7) Plot a2(sigma) ---
-    fig, ax = plt.subplots(figsize=(6, 6))
-    ax.plot(sigmas_fit, a2_prev, "r.", label=r"Estimated $a_{2}$")
-    ax.plot(sigmas_fit, np.polyval(coeffs_a2, sigmas_fit), "k--", lw=2.0, label="Linear fit")
-    ax.set_xticks([0.6, 0.7, 0.8, 0.9, 1.0])
-    ax.set_xlabel(r"Structural diversity $\sigma$", fontsize=20)
-    ax.set_ylabel(r"$a_{2}\,\left(=\Delta/J\right)$", fontsize=20)
-    ax.tick_params(axis="both", labelsize=16)
-    ax.grid(True, linestyle="--", alpha=0.7, linewidth=1.0)
-    ax.spines[["top", "right"]].set_visible(False)
-    ax.legend(frameon=False, fontsize=18)
-    fig.tight_layout()
-    if SaveFig:
-        out = FIG_DIR / "param_est_sigma_to_a2.png"
-        fig.savefig(out, dpi=300, transparent=True, bbox_inches="tight")
-        print(f"Saved: {out}")
-    plt.show()
+        # --- 7) Plot a2(sigma) ---
+        fig, ax = plt.subplots(figsize=(6, 6))
+        ax.plot(sigmas_fit, a2_prev, "r.", label=r"Estimated $a_{2}$")
+        ax.plot(sigmas_fit, np.polyval(coeffs_a2, sigmas_fit), "k--", lw=2.0, label="Linear fit")
+        ax.set_xticks([0.6, 0.7, 0.8, 0.9, 1.0])
+        ax.set_xlabel(r"Structural diversity $\sigma$", fontsize=20)
+        ax.set_ylabel(r"$a_{2}\,\left(=\Delta/J\right)$", fontsize=20)
+        ax.tick_params(axis="both", labelsize=16)
+        ax.grid(True, linestyle="--", alpha=0.7, linewidth=1.0)
+        ax.spines[["top", "right"]].set_visible(False)
+        ax.legend(frameon=False, fontsize=18)
+        fig.tight_layout()
+        if SaveFig:
+            out = FIG_DIR / "param_est_sigma_to_a2.png"
+            fig.savefig(out, dpi=300, transparent=True, bbox_inches="tight")
+            print(f"Saved: {out}")
+        plt.show()
 
     # critical sigma from a2(sigma)=sqrt(2/pi)
     a2_c = np.sqrt(2 / np.pi)
