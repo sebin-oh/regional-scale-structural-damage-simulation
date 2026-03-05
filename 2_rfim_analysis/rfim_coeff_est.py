@@ -28,7 +28,7 @@ import warnings
 # =============================================================================
 # User settings
 # =============================================================================
-SaveFig = False
+SaveFig = True
 RESOLUTION = 501
 
 TARGET_REGION = "Milpitas"
@@ -37,8 +37,8 @@ TARGET_STRUCTURE: Literal["SingleStory", "TwoStory", "MultiStory"] = "MultiStory
 DATA_DIR = Path("../data/damage_simulation_results")
 FIG_DIR = Path("../results")
 
-USE_SAVED_PARAMS = True          # if True and file exists -> skip estimation and load coeffs
-SAVE_PARAMS_AFTER_FIT = True     # if True -> save coeffs after estimating
+LOAD_PARAMS = True    # if True and file exists -> skip estimation and load coeffs
+SAVE_PARAMS = True    # if True -> save coeffs after estimating
 
 RFIM_PARAMS_PATH = Path(f"../data/rfim_params_est/{TARGET_REGION}_{TARGET_STRUCTURE}_rfim_coeffs.npz")
 
@@ -552,7 +552,7 @@ def main() -> None:
     FIG_DIR.mkdir(parents=True, exist_ok=True)
 
     # --- Load saved coeffs if requested ---
-    if USE_SAVED_PARAMS and RFIM_PARAMS_PATH.exists():
+    if LOAD_PARAMS and RFIM_PARAMS_PATH.exists():
         coeffs_a1, coeffs_a2, meta = load_mf_params(RFIM_PARAMS_PATH)
         validate_loaded_meta(meta)
         print(f"Loaded mean-field parameters: {RFIM_PARAMS_PATH}")
@@ -632,7 +632,7 @@ def main() -> None:
         print("Done:", it, diff1, diff2)
 
         # --- Save coeffs if requested ---
-        if SAVE_PARAMS_AFTER_FIT:
+        if SAVE_PARAMS:
             meta = make_rfim_meta()
             save_mf_params(RFIM_PARAMS_PATH, coeffs_a1=coeffs_a1, coeffs_a2=coeffs_a2, meta=meta)
             print(f"Saved mean-field RFIM parameters: {RFIM_PARAMS_PATH}")
@@ -656,10 +656,6 @@ def main() -> None:
             print(f"Saved: {out}")
         plt.show()
 
-        # critical Mw: a1(Mw)=0
-        Mw_c = find_real_root_in_range(coeffs_a1, float(mws_orig.min()), float(mws_orig.max()))
-        print(f"Critical magnitude Mw: {Mw_c:.3f}")
-
         # --- 7) Plot a2(sigma) ---
         fig, ax = plt.subplots(figsize=(6, 6))
         ax.plot(sigmas_fit, a2_prev, "r.", label=r"Estimated $a_{2}$")
@@ -677,6 +673,10 @@ def main() -> None:
             fig.savefig(out, dpi=300, transparent=True, bbox_inches="tight")
             print(f"Saved: {out}")
         plt.show()
+
+    # critical Mw: a1(Mw)=0
+    Mw_c = find_real_root_in_range(coeffs_a1, float(mws_orig.min()), float(mws_orig.max()))
+    print(f"Critical magnitude Mw: {Mw_c:.3f}")
 
     # critical sigma from a2(sigma)=sqrt(2/pi)
     a2_c = np.sqrt(2 / np.pi)

@@ -64,8 +64,8 @@ EngVariant      = Literal["base", "eng"]
 # =============================================================================
 # User config
 # =============================================================================
-FIGURE_TYPE: Literal["heatmap", "histogram", "phase_diagram", "fragility", "eng"] = "eng"
-SAVE_FIG = False
+FIGURE_TYPE: Literal["heatmap", "histogram", "phase_diagram", "fragility", "eng"] = "phase_diagram"
+SAVE_FIG = True
 
 # Directories (override via env vars if you want)
 DATA_DIR = Path(os.environ.get("DATA_DIR", "../data"))
@@ -916,13 +916,13 @@ def main_fragility_curves(
 if __name__ == "__main__":
     if FIGURE_TYPE == "heatmap":
         main_heatmap(
-            mode="2nd", # 1st/2nd: Mw/sigma sweep
+            mode="1st", # 1st/2nd: Mw/sigma sweep
             target_region="Milpitas",
             target_structure="MultiStory",
             mw_fixed=5.6,
             sigma_fixed=0.0,
             smooth_sigma=0.0,     # Gaussian smoothing; set 0 to disable
-            cutoff="p99",
+            cutoff="p95",        # Recommended: "p95" for the "1st" mode, "p99" for the "2nd" mode
             step_fraction=1 / 1000,
             cmap="RdYlBu_r",
             title=None,
