@@ -15,15 +15,6 @@ from scipy.optimize import newton, root_scalar
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
 
-# plt.rcParams["font.family"] = "serif"
-# plt.rcParams["font.serif"] = ["Times New Roman"] + plt.rcParams["font.serif"]
-# plt.rcParams["mathtext.fontset"] = "cm"
-
-plt.rcParams.update({
-    "font.family": "sans-serif",
-    "font.sans-serif": ["Helvetica", "Arial"],
-    "mathtext.fontset": "cm",
-})
 
 SaveFig = False  # Set to True to save figures
 RESOLUTION = 100  # Grid resolution for plots
@@ -33,8 +24,18 @@ RESOLUTION = 100  # Grid resolution for plots
 Mws = np.round(np.arange(3.5, 8.51, 0.05), 2)
 covs = np.round(np.arange(0.0, 1.001, 0.01), 3)
 
-coeffs_a1 = np.load("../data/rfim_params_est/coeffs_a1.npy").astype(np.float64)
-coeffs_a2 = np.load("../data/rfim_params_est/coeffs_a2.npy").astype(np.float64)
+def load_mf_params(path: Path) -> tuple[np.ndarray, np.ndarray, dict]:
+    obj = np.load(path, allow_pickle=False)
+    coeffs_a1 = np.asarray(obj["coeffs_a1"], dtype=float)
+    coeffs_a2 = np.asarray(obj["coeffs_a2"], dtype=float)
+    meta = json.loads(str(obj["meta"])) if "meta" in obj.files else {}
+    return coeffs_a1, coeffs_a2, meta
+
+TARGET_REGION = "Milpitas"
+TARGET_STRUCTURE: Literal["SingleStory", "TwoStory", "MultiStory"] = "MultiStory"
+
+RFIM_PARAMS_PATH = Path("../data/rfim_params_est/{TARGET_REGION}_{TARGET_STRUCTURE}_rfim_coeffs.npz")
+coeffs_a1, coeffs_a2, meta = load_mf_params(RFIM_PARAMS_PATH)
 
 def Mw_to_a1(Mw):
     return np.polyval(coeffs_a1, Mw)
@@ -62,112 +63,19 @@ def landau_free_energy(m, Mw, cov, eps=1e-12):
 
     return term_quad - term_erf - term_exp
 
-# %% 1D plot of Landau free energy
-
-Mw_val = 5.6
-cov_val = 0.0
-
-m_vals = np.linspace(-1, 1, RESOLUTION)
-
-F_vals = landau_free_energy(m_vals, Mw_val, cov_val)
-F_vals -= np.min(F_vals)
-
-plt.figure(figsize=(6, 4))
-plt.plot(m_vals, F_vals, 'k-')
-plt.xlabel(r'$m$', fontsize=16)
-plt.ylabel(r'$F(m)$', fontsize=16)
-plt.ylim(0, None)
-plt.xlim(m_vals[0], m_vals[-1])
-plt.tight_layout()
-# plt.savefig("Landau_free_energy_example.png")
-plt.show()
-
-# %% 2D heatmap of Landau free energy
-
-Mw_vals = np.linspace(3.5, 8.5, RESOLUTION)
-cov_val = 0.0
-
-M, m_m = np.meshgrid(Mw_vals, m_vals)
-Z_m = landau_free_energy(m_m, M, cov_val)
-
-Z = Z_m.copy()
-Z_max_gap = 0.0
-for ii in range(Z.shape[1]):
-    Z_temp = Z[:, ii]
-    Z_temp_gap = np.max(Z_temp) - np.min(Z_temp)
-    if Z_temp_gap > Z_max_gap:
-        Z_max_gap = Z_temp_gap
-
-    Z_temp_normed = Z_temp - np.min(Z_temp)
-
-    Z[:, ii] = Z_temp_normed
-Z /= Z_max_gap
-
-plt.figure(figsize=(8, 6))
-plt.contourf(M, m_m, Z, levels=50, cmap='RdYlBu')
-plt.colorbar(label=r'$F(m)$')
-plt.xlabel(r'$M_w$', fontsize=16)
-plt.ylabel(r'$\mathrm{Cov}$', fontsize=16)
-plt.title(r'Landau Free Energy Heatmap (Mw={:.2f})'.format(Mw_val), fontsize=16)
-plt.tight_layout()
-plt.show()
-
-cov_vals = np.linspace(0.0, 1.0, RESOLUTION)
-Mw_val = 5.6
-
-C, m_c = np.meshgrid(cov_vals, m_vals)
-Z_c = landau_free_energy(m_c, Mw_val, C)
-
-Z = Z_c.copy()
-Z_max_gap = 0.0
-for ii in range(Z.shape[1]):
-    Z_temp = Z[:, ii]
-    Z_temp_gap = np.max(Z_temp) - np.min(Z_temp)
-    if Z_temp_gap > Z_max_gap:
-        Z_max_gap = Z_temp_gap
-
-    Z_temp_normed = Z_temp - np.min(Z_temp)
-
-    Z[:, ii] = Z_temp_normed
-Z /= Z_max_gap
-
-plt.figure(figsize=(8, 6))
-plt.contourf(C, m_c, Z, levels=50, cmap='RdYlBu')
-plt.colorbar(label=r'$F(m)$')
-plt.xlabel(r'$\mathrm{Cov}$', fontsize=16)
-plt.ylabel(r'$m$', fontsize=16)
-plt.title(r'Landau Free Energy Heatmap (Mw={:.2f})'.format(Mw_val), fontsize=16)
-plt.tight_layout()
-plt.show()
-
-# %% 3D surface plot of Landau free energy
-from mpl_toolkits.mplot3d import Axes3D
-
-fig = plt.figure(figsize=(8, 6))
-ax = fig.add_subplot(111, projection='3d')
-ax.plot_surface(M, m_m, Z_m, cmap='RdYlBu')
-ax.set_xlabel(r'$M_w$', fontsize=16)
-ax.set_ylabel(r'$m$', fontsize=16)
-ax.set_zlabel(r'$F(m)$', fontsize=16)
-ax.set_title(r'Landau Free Energy Landscape (cov={:.2f})'.format(cov_val), fontsize=16)
-plt.tight_layout()
-plt.show()
-
-fig = plt.figure(figsize=(8, 6))
-ax = fig.add_subplot(111, projection='3d')
-ax.plot_surface(M, m_c, Z_c, cmap='RdYlBu')
-ax.set_xlabel(r'$\mathrm{Cov}$', fontsize=16)
-ax.set_ylabel(r'$m$', fontsize=16)
-ax.set_zlabel(r'$F(m)$', fontsize=16)
-ax.set_title(r'Landau Free Energy Landscape (Mw={:.2f})'.format(Mw_val), fontsize=16)
-plt.tight_layout()
-plt.show()
 
 # %%
 
 select = "Mw" # "cov" or "Mw"
 
 contour_levels = 500
+
+m_vals = np.linspace(-1, 1, RESOLUTION)
+Mw_vals = np.linspace(3.5, 8.5, RESOLUTION)
+cov_val = 0.0
+
+M, m_m = np.meshgrid(Mw_vals, m_vals)
+Z_m = landau_free_energy(m_m, M, cov_val)
 
 if select == "Mw":
     PARAM = M.copy()

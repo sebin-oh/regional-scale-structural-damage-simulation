@@ -22,6 +22,8 @@ from matplotlib.colors import ListedColormap
 from scipy.optimize import least_squares
 from scipy.special import erf, erfinv
 
+import json
+import warnings
 
 # =============================================================================
 # User settings
@@ -34,6 +36,11 @@ TARGET_STRUCTURE: Literal["SingleStory", "TwoStory", "MultiStory"] = "MultiStory
 
 DATA_DIR = Path("../data/damage_simulation_results")
 FIG_DIR = Path("../results")
+
+USE_SAVED_PARAMS = True          # if True and file exists -> skip estimation and load coeffs
+SAVE_PARAMS_AFTER_FIT = True     # if True -> save coeffs after estimating
+
+RFIM_PARAMS_PATH = Path("../data/rfim_params_est/{TARGET_REGION}_{TARGET_STRUCTURE}_rfim_coeffs.npz")
 
 MWS = np.round(np.arange(3.5, 8.51, 0.05), 2)
 SIGMAS = np.round(np.arange(0.0, 1.001, 0.01), 3)
@@ -78,6 +85,54 @@ def dv_file(
     kind = "repair_cost" if cost else "damage_fraction"
     fname = f"{region}_{structure}_{kind}_Mw{mw_label(mw)}_sigma{sigma_label(sigma)}.npy"
     return DATA_DIR / region / kind / fname
+
+
+def save_mf_params(path: Path, *, coeffs_a1: np.ndarray, coeffs_a2: np.ndarray, meta: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(
+        path,
+        coeffs_a1=np.asarray(coeffs_a1, dtype=float),
+        coeffs_a2=np.asarray(coeffs_a2, dtype=float),
+        meta=json.dumps(meta),
+    )
+
+def load_mf_params(path: Path) -> tuple[np.ndarray, np.ndarray, dict]:
+    obj = np.load(path, allow_pickle=False)
+    coeffs_a1 = np.asarray(obj["coeffs_a1"], dtype=float)
+    coeffs_a2 = np.asarray(obj["coeffs_a2"], dtype=float)
+    meta = json.loads(str(obj["meta"])) if "meta" in obj.files else {}
+    return coeffs_a1, coeffs_a2, meta
+
+def make_rfim_meta() -> dict:
+    return {
+        "target_region": TARGET_REGION,
+        "target_structure": TARGET_STRUCTURE,
+        "mws_minmax": [float(MWS.min()), float(MWS.max())],
+        "sigmas_minmax": [float(SIGMAS.min()), float(SIGMAS.max())],
+        "sigma_fit_start_idx": int(SIGMA_FIT_START_IDX),
+        "hist_bins": int(HIST_BINS),
+        "top_mass_frac": float(TOP_MASS_FRAC),
+        "num_sim": int(NUM_SIM),
+        "ridge": float(RIDGE),
+        "lam_width": float(LAM_WIDTH),
+        "m_band": float(M_BAND),
+        "a2_floor": float(A2_FLOOR),
+        "monotone_a2": bool(ENFORCE_MONOTONE_A2),
+        "a1_poly_degree": 2,
+        "a2_poly_degree": 1,
+    }
+
+def validate_loaded_meta(meta: dict) -> None:
+    # Soft checks only (warn but continue)
+    if not meta:
+        return
+    if meta.get("target_region") != TARGET_REGION or meta.get("target_structure") != TARGET_STRUCTURE:
+        warnings.warn(
+            f"Loaded params were saved for region/structure "
+            f"{meta.get('target_region')}/{meta.get('target_structure')} "
+            f"but current is {TARGET_REGION}/{TARGET_STRUCTURE}.",
+            RuntimeWarning,
+        )
 
 
 # =============================================================================
@@ -494,72 +549,91 @@ def fixed_point_solve(
 # Main workflow
 # =============================================================================
 def main() -> None:
-    # --- 1) Load DV summaries ---
-    top_values_mean = load_top_values_mean(
-        region=TARGET_REGION,
-        structure=TARGET_STRUCTURE,
-        mws=MWS,
-        sigmas=SIGMAS,
-        bins=HIST_BINS,
-        top_mass_frac=TOP_MASS_FRAC,
-        num_sim=NUM_SIM,
-    )
-    print("Damage simulation data loaded\n")
+    # --- Load saved coeffs if requested ---
+    if USE_SAVED_PARAMS and RFIM_PARAMS_PATH.exists():
+        coeffs_a1, coeffs_a2, meta = load_mf_params(RFIM_PARAMS_PATH)
+        validate_loaded_meta(meta)
+        print(f"Loaded mean-field parameters: {RFIM_PARAMS_PATH}")
+        a1_prev = None
+        a2_prev = None
+        sigmas_fit = SIGMAS[SIGMA_FIT_START_IDX:]  # keep for plotting axes/labels
+        mws_orig = MWS.copy()
+        sigmas_orig = SIGMAS.copy()
 
-    # Keep originals for plotting grids
-    top_values_mean_orig = top_values_mean.copy()
-    mws_orig = MWS.copy()
-    sigmas_orig = SIGMAS.copy()
-
-    # --- 2) Choose subset for fitting (match your earlier behavior) ---
-    sigmas_fit = sigmas_orig[SIGMA_FIT_START_IDX:]
-    top_fit = top_values_mean_orig[SIGMA_FIT_START_IDX:, :]
-    m_data = top_fit * 2.0 - 1.0  # map DV ∈ [0,1] to m ∈ [-1,1]
-
-    # --- 3) Initial joint fit (a1 per Mw column, a2 per sigma row) ---
-    a1_hat0, a2_hat0, _ = fit_grid_a1_a2(
-        m_data,
-        a2_init=np.zeros(m_data.shape[0]),
-        ridge=RIDGE,
-        verbose=False,
-    )
-
-    # --- 4) Initialize smooth parameterizations ---
-    coeffs_a1 = np.polyfit(mws_orig, a1_hat0, 2)          # quadratic in Mw
-    coeffs_a2 = fit_linear_nonneg(sigmas_fit, a2_hat0)    # linear in sigma, slope>=0, intercept>=0
-
-    # --- 5) Alternating refinement ---
-    a1_prev = a1_hat0.copy()
-    a2_prev = a2_hat0.copy()
-
-    print("Parameter fitting starts")
-    for it in range(MAX_ITERS):
-        a2_on_sigma = np.clip(np.polyval(coeffs_a2, sigmas_fit), 1e-8, None)
-        a1_new = fit_cols_a1_given_a2(m_data, a2=a2_on_sigma)
-        coeffs_a1 = np.polyfit(mws_orig, a1_new, 2)
-
-        a1_on_mw = np.polyval(coeffs_a1, mws_orig)
-        a2_new = fit_rows_a2_given_a1_with_width(
-            m_data,
-            a1=a1_on_mw,
-            lam_width=LAM_WIDTH,
-            m_band=M_BAND,
-            a2_floor=A2_FLOOR,
-            monotone=ENFORCE_MONOTONE_A2,
+    else:
+        # --- 1) Load DV summaries ---
+        print("Loading damage simulation data...")
+        top_values_mean = load_top_values_mean(
+            region=TARGET_REGION,
+            structure=TARGET_STRUCTURE,
+            mws=MWS,
+            sigmas=SIGMAS,
+            bins=HIST_BINS,
+            top_mass_frac=TOP_MASS_FRAC,
+            num_sim=NUM_SIM,
         )
-        coeffs_a2 = fit_linear_nonneg(sigmas_fit, a2_new)
+        print("Done\n")
 
-        diff1 = float(np.mean((a1_prev - a1_new) ** 2))
-        diff2 = float(np.mean((a2_prev - a2_new) ** 2))
-        print(it, diff1, diff2)
+        # Keep originals for plotting grids
+        top_values_mean_orig = top_values_mean.copy()
+        mws_orig = MWS.copy()
+        sigmas_orig = SIGMAS.copy()
 
-        a1_prev = (1 - ETA) * a1_prev + ETA * a1_new
-        a2_prev = (1 - ETA) * a2_prev + ETA * a2_new
+        # --- 2) Choose subset for fitting (match your earlier behavior) ---
+        sigmas_fit = sigmas_orig[SIGMA_FIT_START_IDX:]
+        top_fit = top_values_mean_orig[SIGMA_FIT_START_IDX:, :]
+        m_data = top_fit * 2.0 - 1.0  # map DV ∈ [0,1] to m ∈ [-1,1]
 
-        if max(diff1, diff2) <= TOL:
-            break
+        # --- 3) Initial joint fit (a1 per Mw column, a2 per sigma row) ---
+        a1_hat0, a2_hat0, _ = fit_grid_a1_a2(
+            m_data,
+            a2_init=np.zeros(m_data.shape[0]),
+            ridge=RIDGE,
+            verbose=False,
+        )
 
-    print("done:", it, diff1, diff2)
+        # --- 4) Initialize smooth parameterizations ---
+        coeffs_a1 = np.polyfit(mws_orig, a1_hat0, 2)          # quadratic in Mw
+        coeffs_a2 = fit_linear_nonneg(sigmas_fit, a2_hat0)    # linear in sigma, slope>=0, intercept>=0
+
+        # --- 5) Alternating refinement ---
+        a1_prev = a1_hat0.copy()
+        a2_prev = a2_hat0.copy()
+
+        print("Proceeds parameter fitting...")
+        for it in range(MAX_ITERS):
+            a2_on_sigma = np.clip(np.polyval(coeffs_a2, sigmas_fit), 1e-8, None)
+            a1_new = fit_cols_a1_given_a2(m_data, a2=a2_on_sigma)
+            coeffs_a1 = np.polyfit(mws_orig, a1_new, 2)
+
+            a1_on_mw = np.polyval(coeffs_a1, mws_orig)
+            a2_new = fit_rows_a2_given_a1_with_width(
+                m_data,
+                a1=a1_on_mw,
+                lam_width=LAM_WIDTH,
+                m_band=M_BAND,
+                a2_floor=A2_FLOOR,
+                monotone=ENFORCE_MONOTONE_A2,
+            )
+            coeffs_a2 = fit_linear_nonneg(sigmas_fit, a2_new)
+
+            diff1 = float(np.mean((a1_prev - a1_new) ** 2))
+            diff2 = float(np.mean((a2_prev - a2_new) ** 2))
+            print(it, diff1, diff2)
+
+            a1_prev = (1 - ETA) * a1_prev + ETA * a1_new
+            a2_prev = (1 - ETA) * a2_prev + ETA * a2_new
+
+            if max(diff1, diff2) <= TOL:
+                break
+
+        print("Done:", it, diff1, diff2)
+
+        # --- Save coeffs if requested ---
+        if SAVE_PARAMS_AFTER_FIT:
+            meta = make_rfim_meta()
+            save_mf_params(RFIM_PARAMS_PATH, coeffs_a1=coeffs_a1, coeffs_a2=coeffs_a2, meta=meta)
+            print(f"Saved mean-field RFIM parameters: {RFIM_PARAMS_PATH}")
 
     FIG_DIR.mkdir(parents=True, exist_ok=True)
 
