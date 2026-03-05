@@ -54,26 +54,17 @@ CP_STRUCT_TYPES = {
     "W2": "#8CD17D",
 }
 
-plt.rcParams.update(
-    {
-        "font.family": "sans-serif",
-        "font.sans-serif": ["Helvetica"],
-        "mathtext.fontset": "cm",
-    }
-)
-
-
 # =============================================================================
 # Types
 # =============================================================================
-StructureType = Literal["SingleStory", "TwoStory", "MultiStory", "All"]
-ModeType = Literal["1st", "2nd"]  # 1st: Mw sweep, 2nd: sigma sweep
-
+StructureType   = Literal["SingleStory", "TwoStory", "MultiStory", "All"]
+ModeType        = Literal["1st", "2nd"]  # 1st: Mw sweep, 2nd: sigma sweep
+EngVariant      = Literal["base", "eng"]
 
 # =============================================================================
 # User config
 # =============================================================================
-FIGURE_TYPE: Literal["heatmap", "histogram", "phase_diagram", "fragility", "eng"] = "heatmap"
+FIGURE_TYPE: Literal["heatmap", "histogram", "phase_diagram", "fragility", "eng"] = "eng"
 SAVE_FIG = False
 
 # Directories (override via env vars if you want)
@@ -93,8 +84,8 @@ def mw_label(mw: float) -> str:
     return f"{int(round(float(mw) * 100)):03d}"
 
 
-def sigma_label(sigma: float, *, scale: int = 1000, width: int = 4) -> str:
-    # sigma=0.01 -> "0010" when scale=1000, width=4
+def sigma_label(sigma: float, *, scale: int = 100, width: int = 3) -> str:
+    # sigma=0.01 -> "001" when scale=100, width=3
     return f"{int(round(float(sigma) * scale)):0{width}d}"
 
 
@@ -112,14 +103,46 @@ def dv_path(
 ) -> Path:
     """
     Default file pattern:
-      {DATA_DIR}/damage_simulation_results/{region}/{kind}/{structure}_damage_fraction_Mw{mw}_sigma{sigma}_{region}[_{gmm}].npy
     """
     kind = "repair_cost" if cost else "damage_fraction"
     fname = f"{target_region}_{target_structure}_{kind}_Mw{mw_label(mw)}_sigma{sigma_label(sigma)}"
     if gmm:
         fname += f"_{gmm}"
     fname += ".npy"
-    return DATA_DIR / "damage_simulation_results" / target_region / fname
+    return DATA_DIR / "damage_simulation_results" / target_region / kind / fname
+
+
+def eng_dv_path(
+    *,
+    target_region: str,
+    target_structure: StructureType,
+    cost: bool,
+    mw: float,
+    sigma: float,
+    category: Optional[str],
+    corr_eng: str,
+    variant: EngVariant,
+) -> Path:
+    """
+    Engineering-practice DV file path helper.
+    """
+    kind = "dv_cost" if cost else "dv"
+    subdir = Path("eng")
+
+    mw_lab = mw_label(mw)
+    sig_lab = sigma_label(sigma, scale=100, width=3)  # matches your eng filenames
+
+    if category is not None:
+        subdir = subdir / "categorization" / kind
+        tag = "No" if variant == "base" else str(category)
+        suffix = f"_cate{tag}"
+    else:
+        subdir = subdir / "corr" / kind
+        tag = "Dpdn" if variant == "base" else str(corr_eng)
+        suffix = f"_corr{tag}"
+
+    fname = f"{target_structure}_{kind}_Mw{mw_lab}_sigma{sig_lab}_{target_region}{suffix}.npy"
+    return DATA_DIR / "damage_simulation_results" / target_region / kind / fname
 
 
 def load_region_info(target_region: str) -> pd.DataFrame:
@@ -392,7 +415,7 @@ def plot_histogram(
 def main_heatmap(
     *,
     mode: ModeType = "1st",
-    target_region: str = "Milpitas_all",
+    target_region: str = "Milpitas",
     target_structure: StructureType = "MultiStory",
     mw_fixed: float = 5.6,           # used when mode="2nd"
     sigma_fixed: float = 0.0,        # used when mode="1st"
@@ -463,7 +486,7 @@ def main_heatmap(
 def main_histogram(
     *,
     mode: ModeType = "1st",
-    target_region: str = "Milpitas_all",
+    target_region: str = "Milpitas",
     target_structure: StructureType = "MultiStory",
     cost: bool = False,
     mw: float = 5.6,
@@ -557,7 +580,7 @@ def phase_coexistence_detect(
 
 def main_phase_diagram(
     *,
-    target_region: str = "Milpitas_all",
+    target_region: str = "Milpitas",
     target_structure: StructureType = "MultiStory",
     num_bins: int = 100,
     cmap: str = "RdYlBu_r",
@@ -641,6 +664,171 @@ def main_phase_diagram(
     return fig, ax
 
 
+def main_eng(
+    *,
+    target_region: str = "Milpitas_all",
+    target_structure: StructureType = "MultiStory",
+    category: Optional[str] = None,   # e.g., "StructureType" (categorization case); None -> correlation case
+    corr: str = "Indp",               # used only when category is None (engineering corr tag)
+    cost: bool = True,
+    legend: bool = True,
+    savefig: bool = False,
+) -> Tuple[plt.Figure, plt.Axes]:
+    """
+    Compare baseline vs engineering-practice DV distributions using split violin plots.
+
+    Baseline vs Eng:
+      - If category is not None:
+          baseline = cateNo, eng = cate{category}
+      - If category is None:
+          baseline = corrDpdn (dependent), eng = corr{corr} (e.g., Indp)
+
+    If cost=True, values are assumed to be repair costs in dollars and plotted in million $.
+    """
+    import matplotlib.colors as mcolors
+    import matplotlib.patches as mpatches
+
+    # Colors (kept from your original logic)
+    if target_region == "SanFrancisco_NE":
+        cL, cR = CP_HEX[3], CP_HEX[2]
+        mw_vals = np.array([5.0, 5.5, 6.0, 6.5, 7.0, 7.5], dtype=float)
+    else:
+        cL, cR = CP_HEX[3], CP_HEX[4]
+        mw_vals = np.array([4.5, 5.0, 5.5, 6.0, 6.5, 7.0], dtype=float)
+
+    # Mw grid (must match the simulation grid used to save dv files)
+    mws = np.round(np.arange(3.5, 8.51, 0.05), 2)
+    mw_idxs = [int(np.argmin(np.abs(mws - t))) for t in mw_vals]
+    print("Exact Mws used for violins:", mws[mw_idxs])
+
+    # For the eng outputs you used sigma=0.0 (and *100 labeling)
+    sigma0 = 0.0
+
+    # Load dv arrays across all Mw (baseline + engineering)
+    dv_base = []
+    dv_eng = []
+    for mw in mws:
+        p_base = eng_dv_path(
+            target_region=target_region,
+            target_structure=target_structure,
+            cost=cost,
+            mw=float(mw),
+            sigma=sigma0,
+            category=category,
+            corr_eng=corr,
+            variant="base",
+        )
+        p_eng = eng_dv_path(
+            target_region=target_region,
+            target_structure=target_structure,
+            cost=cost,
+            mw=float(mw),
+            sigma=sigma0,
+            category=category,
+            corr_eng=corr,
+            variant="eng",
+        )
+        if not p_base.exists():
+            raise FileNotFoundError(f"Missing baseline DV file: {p_base}")
+        if not p_eng.exists():
+            raise FileNotFoundError(f"Missing engineering DV file: {p_eng}")
+
+        dv_base.append(np.load(p_base))
+        dv_eng.append(np.load(p_eng))
+
+    dv_base = np.asarray(dv_base, dtype=float)  # (n_mw, n_sim)
+    dv_eng = np.asarray(dv_eng, dtype=float)
+
+    # Optional: scale cost for “Slight” vs “Moderate” mismatch (kept as your original behavior)
+    if cost:
+        dv_base = dv_base / 5.0
+        dv_eng = dv_eng / 5.0
+
+    def clean_values(x: np.ndarray) -> np.ndarray:
+        x = np.asarray(x, dtype=float)
+        x = x[np.isfinite(x)]
+        if cost:
+            return x / 1e6  # million $
+        return x
+
+    data_left = [clean_values(dv_base[i, :]) for i in mw_idxs]
+    data_right = [clean_values(dv_eng[i, :]) for i in mw_idxs]
+
+    # --- Split violin helper ---
+    def split_violin(ax, left, right, x, *, width=0.8, alpha=0.5, bw=None, points=200):
+        vL = ax.violinplot([left], positions=[x], widths=width, bw_method=bw,
+                           points=points, showmeans=False, showmedians=False, showextrema=False)
+        for pc in vL["bodies"]:
+            verts = pc.get_paths()[0].vertices
+            m = np.mean(verts[:, 0])
+            verts[:, 0] = np.minimum(verts[:, 0], m)
+            pc.set_facecolor(mcolors.to_rgba(cL, alpha))
+            pc.set_edgecolor((0, 0, 0, 1))
+            pc.set_linewidth(1.0)
+            pc.set_zorder(3)
+
+        vR = ax.violinplot([right], positions=[x], widths=width, bw_method=bw,
+                           points=points, showmeans=False, showmedians=False, showextrema=False)
+        for pc in vR["bodies"]:
+            verts = pc.get_paths()[0].vertices
+            m = np.mean(verts[:, 0])
+            verts[:, 0] = np.maximum(verts[:, 0], m)
+            pc.set_facecolor(mcolors.to_rgba(cR, alpha))
+            pc.set_edgecolor((0, 0, 0, 1))
+            pc.set_linewidth(1.0)
+            pc.set_zorder(3)
+
+    # Less smoothing than Scott’s rule (kept from your original intent)
+    bw_less = lambda kde: kde.scotts_factor() * 0.4
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    positions = np.arange(1, len(mw_vals) + 1, dtype=float)
+
+    for x, L, R in zip(positions, data_left, data_right):
+        split_violin(ax, L, R, x, width=0.8, alpha=0.5, bw=bw_less, points=200)
+
+    ax.set_xticks(positions)
+    ax.set_xticklabels([f"{t:.1f}" for t in mw_vals])
+    ax.tick_params(axis="both", labelsize=17)
+    ax.set_xlabel(r"Earthquake magnitude $M_w$", fontsize=20)
+
+    if cost:
+        ax.set_ylabel("Repair cost (million $)", fontsize=20)
+    else:
+        ax.set_ylabel("Damage fraction", fontsize=20)
+
+    ax.grid(True, linestyle="--", alpha=0.4, linewidth=0.8)
+    ax.spines[["top", "right"]].set_visible(False)
+
+    if legend:
+        if category is not None:
+            lab_left = "Baseline (no categorization)"
+            lab_right = f"Categorized ({category})"
+        else:
+            lab_left = "Baseline (dependent)"
+            lab_right = f"Engineering ({corr})"
+
+        handles = [
+            mpatches.Patch(facecolor=mcolors.to_rgba(cL, 0.5), edgecolor="black", linewidth=1.0, label=lab_left),
+            mpatches.Patch(facecolor=mcolors.to_rgba(cR, 0.5), edgecolor="black", linewidth=1.0, label=lab_right),
+        ]
+        ax.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.5, 1.02),
+                  ncol=2, frameon=False, fontsize=16, columnspacing=0.8, handlelength=1.2)
+
+        plt.subplots_adjust(top=0.88)
+
+    fig.tight_layout()
+
+    if savefig:
+        FIG_DIR.mkdir(parents=True, exist_ok=True)
+        tag = f"cate_{category}" if category is not None else f"corr_{corr}"
+        out_path = FIG_DIR / f"{target_region}_{target_structure}_eng_{tag}_violin.png"
+        fig.savefig(out_path, dpi=300, transparent=True)
+        print(f"Saved: {out_path}")
+
+    plt.show()
+    return fig, ax
+
 # =============================================================================
 # (Optional) Fragility curves (kept minimal + cleaned)
 # =============================================================================
@@ -678,7 +866,7 @@ def main_fragility_curves(
     frag_params = np.load(frag_path)
     frag_params = frag_params[: bldg_capa.shape[0], :]  # safe alignment if needed
 
-    x = np.linspace(1e-5, 0.6, 1000) if target_region == "Milpitas_all" else np.linspace(1e-5, 1.0, 1000)
+    x = np.linspace(1e-5, 0.6, 1000) if target_region == "Milpitas" else np.linspace(1e-5, 1.0, 1000)
     fig, ax = plt.subplots(figsize=(6, 6))
 
     if category is None:
@@ -726,8 +914,8 @@ def main_fragility_curves(
 if __name__ == "__main__":
     if FIGURE_TYPE == "heatmap":
         main_heatmap(
-            mode="2nd",
-            target_region="Milpitas_all",
+            mode="2nd", # 1st/2nd: Mw/sigma sweep
+            target_region="Milpitas",
             target_structure="MultiStory",
             mw_fixed=5.6,
             sigma_fixed=0.0,
@@ -742,7 +930,7 @@ if __name__ == "__main__":
     elif FIGURE_TYPE == "histogram":
         main_histogram(
             mode="2nd",
-            target_region="Milpitas_all",
+            target_region="Milpitas",
             target_structure="MultiStory",
             cost=False,
             mw=5.6,
@@ -757,7 +945,7 @@ if __name__ == "__main__":
 
     elif FIGURE_TYPE == "phase_diagram":
         main_phase_diagram(
-            target_region="Milpitas_all",
+            target_region="Milpitas",
             target_structure="MultiStory",
             num_bins=100,
             cmap="RdYlBu_r",
