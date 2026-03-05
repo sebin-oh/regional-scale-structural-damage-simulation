@@ -46,6 +46,8 @@ PLOT_BASEMAP = True  # requires internet for tiles
 BERKELEY_DISTRICTS_SHP = Path("../data/CoB_CouncilDistricts/CoB_CouncilDistricts.shp")
 BERKELEY_DISTRICT_IDS = {"5", "6"}  # North Berkeley districts
 
+# Only needed for TARGET_REGION == "SanFrancisco_NE"
+SF_NEIGHBORHOODS_PATH = Path("../data/SanFrancisco_Neighborhoods_Boundary.geojson")
 
 # =============================================================================
 # Helpers

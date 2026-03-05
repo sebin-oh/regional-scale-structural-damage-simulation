@@ -34,14 +34,13 @@ DTYPE_NP = np.float64
 SEED = 42
 
 SIGMAS = np.round(np.arange(0.0, 1.001, 0.01), 3)  # lognormal sigma values
-SIGMA_LABEL_SCALE = 100  # sigma=0.25 -> "025"
 
 
 # =============================================================================
 # Helpers
 # =============================================================================
 def sigma_label(sigma: float) -> str:
-    return f"{int(round(float(sigma) * SIGMA_LABEL_SCALE)):03d}"
+    return f"{int(round(float(sigma) * 100)):03d}"
 
 
 def load_capacities(csv_path: Path, dtype: np.dtype) -> np.ndarray:
@@ -57,33 +56,29 @@ def load_capacities(csv_path: Path, dtype: np.dtype) -> np.ndarray:
     return capa
 
 
-def drop_nan_buildings(capa: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Drop buildings (rows) with any NaN and return:
-      - filtered capacities
-      - keep mask (True for retained buildings)
-    """
-    has_nan = np.any(~np.isfinite(capa), axis=1)
-    keep = ~has_nan
-    return capa[keep, :], keep
-
-
 def fit_lognormal_params(capa: np.ndarray, dtype: np.dtype) -> np.ndarray:
     """
     Fit lognormal(shape, loc, scale) per building from capacity samples.
 
+    Rule:
+      - If a building has ANY non-finite value in its capacity row, return [NaN, NaN, NaN].
+      - Else fit using positive samples; if too few positive samples, return NaNs.
+
     Returns array of shape (n_bldgs, 3) = [shape, loc, scale].
     """
     n_bldgs = capa.shape[0]
-    out = np.empty((n_bldgs, 3), dtype=dtype)
+    out = np.full((n_bldgs, 3), np.nan, dtype=dtype)
 
     for i in range(n_bldgs):
-        x = capa[i]
-        x = x[np.isfinite(x) & (x > 0)]
+        row = capa[i]
 
-        # Robust fallback if too few samples
+        # Keep building, but mark frag params as NaN if any capacity value is NaN/inf
+        if not np.all(np.isfinite(row)):
+            continue
+
+        x = row[row > 0]
         if x.size < 2:
-            x = np.array([1e-6, 2e-6], dtype=dtype)
+            continue
 
         shape, loc, scale = lognorm.fit(x, floc=0)
         out[i] = (dtype(shape), dtype(loc), dtype(scale))
@@ -98,18 +93,18 @@ def main() -> None:
     rng = np.random.default_rng(SEED)
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    # 1) Load capacities and drop NaN buildings
+    # 1) Load capacities (do NOT drop buildings)
     capa = load_capacities(IDA_CSV, DTYPE_NP)
-    capa, keep_mask = drop_nan_buildings(capa)
+    n_bldgs, n_gms = capa.shape
+    print(f"Loaded capacities: {n_bldgs:,} buildings x {n_gms:,} GMs")
 
-    print(f"Loaded capacities: {capa.shape[0]:,} buildings x {capa.shape[1]:,} GMs")
-    if not np.all(keep_mask):
-        print(f"Dropped {np.sum(~keep_mask):,} buildings due to NaNs")
-
-    # 2) Fit baseline fragility params (sigma000)
+    # 2) Fit baseline fragility params (sigma000), with NaN rows preserved
     frag0 = fit_lognormal_params(capa, DTYPE_NP)
 
-    # Optionally save baseline too (useful for consistency)
+    n_nan = int(np.sum(~np.isfinite(frag0[:, 2])))
+    if n_nan > 0:
+        print(f"Baseline frag params: {n_nan:,}/{n_bldgs:,} buildings set to NaN (due to NaN/inf or insufficient samples).")
+
     np.save(OUT_DIR / "frag_params_sigma000.npy", frag0)
 
     # 3) Generate sigma-perturbed variants by scaling the lognormal scale parameter
@@ -120,8 +115,11 @@ def main() -> None:
         frag = frag0.copy()
 
         if sigma > 0:
-            noise = rng.lognormal(mean=0.0, sigma=float(sigma), size=frag.shape[0])
-            frag[:, 2] *= noise  # perturb scale only
+            noise = rng.lognormal(mean=0.0, sigma=float(sigma), size=frag.shape[0]).astype(DTYPE_NP, copy=False)
+
+            # Only apply noise where baseline scale is finite; NaNs stay NaN
+            mask = np.isfinite(frag[:, 2])
+            frag[mask, 2] *= noise[mask]
 
         np.save(OUT_DIR / f"frag_params_sigma{lab}.npy", frag)
 

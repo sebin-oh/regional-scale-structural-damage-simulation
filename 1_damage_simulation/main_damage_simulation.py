@@ -34,12 +34,12 @@ from scipy.stats import lognorm
 
 warnings.simplefilter(action="ignore", category=FutureWarning)
 
-from fn_GMPE_parallel_gpu_vec import (
+from fn_GMPE import (
     gmm_CY14,
     gmm_ASK14,
     gmm_BSSA14,
     gmm_CB14,
-    intra_residuals_corr_fn_cupy,
+    intra_residuals_corr,
 )
 
 
@@ -49,8 +49,8 @@ from fn_GMPE_parallel_gpu_vec import (
 TARGET_REGION = "Milpitas"
 TARGET_STRUCTURE = "MultiStory"  # "SingleStory", "TwoStory", "MultiStory", or "All"
 
-SIGMAS = np.round(np.arange(0.0, 1.001, 0.01), 3)
-MWS = np.round(np.arange(6.25, 8.51, 0.05), 2)
+SIGMAS = np.round(np.arange(0.0, 1.001, 0.01), 2)
+MWS = np.round(np.arange(3.5, 8.51, 0.05), 2)
 
 GMM_NAME = "CY14"  # "CY14", "ASK14", "BSSA14", "CB14"
 NUM_SIM = 10_000
@@ -173,7 +173,7 @@ ln_capa_corr_np = np.corrcoef(ln_capa, rowvar=True).astype(DTYPE_NP, copy=False)
 
 # Baseline capacity mean/std (sigma000). Prefer loading a precomputed file;
 # otherwise fit lognormal params from IDA capacities.
-frag_path = FRAG_DIR / f"frag0_sigma{sigma_label(0.0)}.npy"
+frag_path = FRAG_DIR / f"frag_params_sigma{sigma_label(0.0)}.npy"
 
 frag0 = None
 
@@ -182,11 +182,9 @@ if frag_path.exists():
         frag0_loaded = np.load(frag_path).astype(DTYPE_NP, copy=False)
 
         # Align if the file contains the full inventory and you have a keep-mask
-        # (safe no-op if already aligned)
-        if "keep" in globals():
-            keep_mask = np.asarray(keep, dtype=bool)
-            if frag0_loaded.shape[0] == keep_mask.size:
-                frag0_loaded = frag0_loaded[keep_mask, :]
+        # (safe no-op if already aligned)        
+        if frag0_loaded.shape[0] == keep.size:
+            frag0_loaded = frag0_loaded[keep, :]
 
         frag0 = frag0_loaded
 
@@ -255,7 +253,7 @@ event_xy = (DTYPE_NP(event_e), DTYPE_NP(event_n))
 # =============================================================================
 # Demand correlation (GPU)
 # =============================================================================
-ln_dmnd_corr_cp = intra_residuals_corr_fn_cupy(
+ln_dmnd_corr_cp = intra_residuals_corr(
     cp.asarray(assets["x"].to_numpy(), dtype=DTYPE_CP),
     cp.asarray(assets["y"].to_numpy(), dtype=DTYPE_CP),
     soil_case=SOIL_CASE,
@@ -316,7 +314,7 @@ for mw in MWS:
         sigma_lab = sigma_label(float(sigma))
         mw_lab = mw_label(float(mw))
 
-        frag = np.load(FRAG_DIR / f"frag0_sigma{sigma_lab}.npy").astype(DTYPE_NP, copy=False)
+        frag = np.load(FRAG_DIR / f"frag_params_sigma{sigma_lab}.npy").astype(DTYPE_NP, copy=False)
         frag = frag[keep, :]
 
         ln_capa_mean_cp = cp.asarray(np.log(frag[:, 2]), dtype=DTYPE_CP)
