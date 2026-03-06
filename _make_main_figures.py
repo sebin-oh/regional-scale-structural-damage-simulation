@@ -68,11 +68,11 @@ FIGURE_TYPE: Literal["heatmap", "histogram", "phase_diagram", "fragility", "eng"
 SAVE_FIG = True
 
 # Directories (override via env vars if you want)
-DATA_DIR = Path(os.environ.get("DATA_DIR", "../data"))
+DATA_DIR = Path(os.environ.get("DATA_DIR", "./data"))
 FIG_DIR = Path(
     os.environ.get(
         "FIG_DIR",
-        r"../results",
+        r"./results",
     )
 )
 

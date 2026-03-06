@@ -50,8 +50,8 @@ SIGMA_MINMAX = (0.0, 1.0)
 M_MINMAX = (-1.0, 1.0)
 
 # Paths
-RFIM_PARAMS_PATH = Path(f"../data/rfim_params_est/{TARGET_REGION}_{TARGET_STRUCTURE}_rfim_coeffs.npz")
-OUT_FIG = Path(f"../results/landau_RFIM_{SELECT}.png")
+RFIM_PARAMS_PATH = Path(f"./data/rfim_params_est/{TARGET_REGION}_{TARGET_STRUCTURE}_rfim_coeffs.npz")
+OUT_FIG = Path(f"./results/landau_RFIM_{SELECT}.png")
 
 
 # =============================================================================

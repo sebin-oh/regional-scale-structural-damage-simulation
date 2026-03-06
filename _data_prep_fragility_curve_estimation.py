@@ -27,8 +27,8 @@ from scipy.stats import lognorm
 # =============================================================================
 TARGET_REGION = "Milpitas"
 
-IDA_CSV = Path(f"../data/IDA_results/{TARGET_REGION}/IDA_results_sigma000.csv")
-OUT_DIR = Path(f"../data/fragility_params/{TARGET_REGION}")
+IDA_CSV = Path(f"./data/IDA_results/{TARGET_REGION}/IDA_results_sigma000.csv")
+OUT_DIR = Path(f"./data/fragility_params/{TARGET_REGION}")
 
 DTYPE_NP = np.float64
 SEED = 42

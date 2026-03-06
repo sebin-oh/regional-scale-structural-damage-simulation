@@ -26,9 +26,9 @@ from fn_find_str_type import find_str_type, cal_lambda
 # User settings
 # =============================================================================
 REGION = "Milpitas"
-BUILDING_CSV = Path(f"../data/building_inventories/RegionalInventory_{REGION}.csv")
-HAZUS_TXT = Path("../data/HazusData.txt")
-OUT_DIR = Path(f"../data/OpenSees_input/{REGION}")
+BUILDING_CSV = Path(f"./data/building_inventories/RegionalInventory_{REGION}.csv")
+HAZUS_TXT = Path("./data/HazusData.txt")
+OUT_DIR = Path(f"./data/OpenSees_input/{REGION}")
 
 # --- Uncertainty control (DEFAULT: OFF) ---
 ENABLE_UNCERTAINTY = False  # <- set True to enable

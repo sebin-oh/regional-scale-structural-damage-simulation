@@ -34,13 +34,13 @@ RESOLUTION = 501
 TARGET_REGION = "Milpitas"
 TARGET_STRUCTURE: Literal["SingleStory", "TwoStory", "MultiStory"] = "MultiStory"
 
-DATA_DIR = Path("../data/damage_simulation_results")
-FIG_DIR = Path("../results")
+DATA_DIR = Path("./data/damage_simulation_results")
+FIG_DIR = Path("./results")
 
 LOAD_PARAMS = True    # if True and file exists -> skip estimation and load coeffs
 SAVE_PARAMS = True    # if True -> save coeffs after estimating
 
-RFIM_PARAMS_PATH = Path(f"../data/rfim_params_est/{TARGET_REGION}_{TARGET_STRUCTURE}_rfim_coeffs.npz")
+RFIM_PARAMS_PATH = Path(f"./data/rfim_params_est/{TARGET_REGION}_{TARGET_STRUCTURE}_rfim_coeffs.npz")
 
 MWS = np.round(np.arange(3.5, 8.51, 0.05), 2)
 SIGMAS = np.round(np.arange(0.0, 1.001, 0.01), 3)

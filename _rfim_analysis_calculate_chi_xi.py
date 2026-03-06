@@ -62,7 +62,7 @@ class Config:
     target_structure: StructureType = "MultiStory"
 
     # Paths
-    data_dir: Path = Path("../data")
+    data_dir: Path = Path("./data")
 
     # Simulation control
     Mw_val: float = 5.55
@@ -823,7 +823,7 @@ def main() -> None:
             auto_frac=1e-3,
             color=CP_HEX[0],
             savefig=SAVE_FIG,
-            out_path=f"../results/chi_vs_sigma_Mw{cfg.Mw_val:.2f}.png",
+            out_path=f"./results/chi_vs_sigma_Mw{cfg.Mw_val:.2f}.png",
         )
 
         curtain_heatmap_smooth(
@@ -839,7 +839,7 @@ def main() -> None:
             auto_frac=1e-3,
             color=CP_HEX[5],
             savefig=SAVE_FIG,
-            out_path=f"../results/xi_vs_sigma_Mw{cfg.Mw_val:.2f}.png",
+            out_path=f"./results/xi_vs_sigma_Mw{cfg.Mw_val:.2f}.png",
         )
 
 

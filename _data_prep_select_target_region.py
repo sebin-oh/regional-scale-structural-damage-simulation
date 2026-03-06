@@ -30,24 +30,24 @@ import contextily as ctx
 # =============================================================================
 # User settings
 # =============================================================================
-INVENTORY_GEOJSON = Path("../data/SF Bay Area Building Inventory Data/sf_inventory.geojson")
+INVENTORY_GEOJSON = Path("./data/SF Bay Area Building Inventory Data/sf_inventory.geojson")
 
 TARGET_REGION = "Milpitas"
 TARGET_REGION_FULL = "Milpitas, California, USA"
 
-VS30_TIF = Path("../data/California_vs30_Wills15_hybrid/California_vs30_Wills15_hybrid.tif")
+VS30_TIF = Path("./data/California_vs30_Wills15_hybrid/California_vs30_Wills15_hybrid.tif")
 
-OUT_CSV = Path(f"../data/building_inventories/RegionalInventory_{TARGET_REGION}.csv")
+OUT_CSV = Path(f"./data/building_inventories/RegionalInventory_{TARGET_REGION}.csv")
 
 PLOT = True
 PLOT_BASEMAP = True  # requires internet for tiles
 
 # Only needed for TARGET_REGION == "NorthBerkeley"
-BERKELEY_DISTRICTS_SHP = Path("../data/CoB_CouncilDistricts/CoB_CouncilDistricts.shp")
+BERKELEY_DISTRICTS_SHP = Path("./data/CoB_CouncilDistricts/CoB_CouncilDistricts.shp")
 BERKELEY_DISTRICT_IDS = {"5", "6"}  # North Berkeley districts
 
 # Only needed for TARGET_REGION == "SanFrancisco_NE"
-SF_NEIGHBORHOODS_PATH = Path("../data/SanFrancisco_Neighborhoods_Boundary.geojson")
+SF_NEIGHBORHOODS_PATH = Path("./data/SanFrancisco_Neighborhoods_Boundary.geojson")
 
 # =============================================================================
 # Helpers

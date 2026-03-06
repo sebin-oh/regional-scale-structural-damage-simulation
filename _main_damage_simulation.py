@@ -68,10 +68,10 @@ DEPTH_TO_TOP = DTYPE_NP(3.0)
 STRIKE, RAKE, DIP = 325, 180, 90
 
 # Paths
-IDA_CSV = Path(f"../data/IDA_results/{TARGET_REGION}/IDA_results_sigma000.csv")
-REGION_CSV = Path(f"../data/building_inventories/RegionalInventory_{TARGET_REGION}.csv")
-FRAG_DIR = Path(f"../data/fragility_params/{TARGET_REGION}")
-OUT_DIR = Path(f"../data/damage_simulation_results/{TARGET_REGION}")
+IDA_CSV = Path(f"./data/IDA_results/{TARGET_REGION}/IDA_results_sigma000.csv")
+REGION_CSV = Path(f"./data/building_inventories/RegionalInventory_{TARGET_REGION}.csv")
+FRAG_DIR = Path(f"./data/fragility_params/{TARGET_REGION}")
+OUT_DIR = Path(f"./data/damage_simulation_results/{TARGET_REGION}")
 
 # If True, capacity covariance is fixed from sigma000.
 # If False, capacity covariance is rebuilt per-SIGMA using that SIGMA’s sigma (slower).

@@ -50,9 +50,9 @@ G_TO_MPS2 = 9.811
 # GM_DIR = ROOT_DIR / "Ground_motion"
 # OUT_DIR = ROOT_DIR / "Results" / REGION
 
-BIM_DIR = Path(f"../data/OpenSees_input/{REGION}" )
-GM_DIR = Path("../data/Ground_motion")
-OUT_DIR = Path(f"../data/IDA_results/{REGION}")
+BIM_DIR = Path(f"./data/OpenSees_input/{REGION}" )
+GM_DIR = Path("./data/Ground_motion")
+OUT_DIR = Path(f"./data/IDA_results/{REGION}")
 
 
 # =============================================================================
