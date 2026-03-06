@@ -65,7 +65,7 @@ EngVariant      = Literal["base", "eng"]
 # User config
 # =============================================================================
 FIGURE_TYPE: Literal["heatmap", "histogram", "phase_diagram", "fragility", "eng"] = "phase_diagram"
-SAVE_FIG = True
+SAVE_FIG = False
 
 # Directories (override via env vars if you want)
 DATA_DIR = Path(os.environ.get("DATA_DIR", "./data"))
